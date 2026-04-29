@@ -1,0 +1,25 @@
+[project]
+name = "ai-test-tool"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "silevilence", email = "silevilence@outlook.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "dearpygui>=2.3",
+    "evalscope>=1.6.1",
+]
+
+[project.scripts]
+ai-test-tool = "ai_test_tool:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
