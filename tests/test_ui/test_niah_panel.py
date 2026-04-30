@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from ui.app import read_evalscope_progress_state
 from ui.components import build_niah_heatmap_state
+from ui.components import build_niah_column_weights
 from ui.components import build_niah_layout_state
+from ui.components import build_niah_overview_metrics
 from ui.components import build_niah_parameter_specs
 from ui.components import build_niah_panel_state
 from ui.components import resolve_niah_layout_dimensions
@@ -68,6 +70,29 @@ def test_build_niah_parameter_specs_exposes_help_text() -> None:
     assert "最终会对长上下文提出的检索问题" in spec_map["niah_retrieval_question"].help_text
     assert "niah_context_lengths_num_intervals" in spec_map
     assert "裁判模型" in spec_map["niah_judge_model_config_list"].help_text
+
+
+def test_build_niah_overview_metrics_summarizes_readiness() -> None:
+    metrics = build_niah_overview_metrics(
+        selected_model_names=("Alpha", "Beta"),
+        judge_model_name="Judge",
+        expected_sample_count=40,
+        show_score=True,
+    )
+
+    assert [metric.label for metric in metrics] == ["待测模型", "裁判模型", "预计样本", "热力图"]
+    assert metrics[0].value == "2 个"
+    assert "Alpha" in metrics[0].detail
+    assert metrics[1].value == "Judge"
+    assert metrics[2].value == "40"
+    assert metrics[3].value == "显示分数"
+
+
+def test_build_niah_column_weights_prioritizes_control_panel_without_hiding_results() -> None:
+    left_weight, right_weight = build_niah_column_weights()
+
+    assert left_weight > right_weight
+    assert right_weight >= 1.0
 
 
 def test_read_evalscope_progress_state_reads_tracker_file(tmp_path) -> None:

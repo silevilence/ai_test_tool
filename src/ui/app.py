@@ -28,6 +28,8 @@ from ui.components import (
     add_log_output,
     add_progress_indicator,
     add_status_bar,
+    build_app_design_palette,
+    build_help_disclosure_state,
     build_navigation_items,
     build_niah_layout_state,
     build_log_panel_state,
@@ -35,13 +37,17 @@ from ui.components import (
     build_model_config_form_state,
     build_model_config_list_items,
     build_model_config_usage_notes,
+    build_niah_column_weights,
     build_niah_heatmap_state,
+    build_niah_overview_metrics,
     build_niah_parameter_specs,
     build_niah_panel_state,
     build_progress_state,
+    build_section_hero_state,
     build_status_state,
     format_log_entries,
     resolve_niah_layout_dimensions,
+    summarize_help_text,
 )
 
 
@@ -81,6 +87,8 @@ _NIAH_MAIN_SPLITTER_WIDTH = 10
 _NIAH_RESULT_SPLITTER_HEIGHT = 10
 _NIAH_RIGHT_PANEL_CHROME_HEIGHT = 108
 _PROGRESS_POLL_INTERVAL_SECONDS = 0.5
+_SECTION_HERO_WRAP = 980
+_CARD_TEXT_WRAP = 520
 _NIAH_EDITABLE_TAGS = (
     "niah_select_all_models_button",
     "niah_clear_models_button",
@@ -106,6 +114,8 @@ class AppShell:
     width: int
     height: int
     navigation_width: int
+    brand_title: str
+    brand_subtitle: str
     status_text: str
     progress_value: float
     progress_overlay: str
@@ -199,15 +209,25 @@ class AppRuntimeState:
     last_drag_mouse_pos: tuple[float, float] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class HelpPopupPayload:
+    title: str
+    description: str
+    supporting_text: str = ""
+    wrap: int = _CARD_TEXT_WRAP
+
+
 def build_app_shell() -> AppShell:
     return AppShell(
         title="LLM API 评测工具",
-        width=1440,
-        height=900,
-        navigation_width=260,
-        status_text="Ready",
+        width=1520,
+        height=980,
+        navigation_width=248,
+        brand_title="Eval Console",
+        brand_subtitle="面向模型联调、批量评测与长上下文检索的桌面工作台",
+        status_text="控制台就绪",
         progress_value=0.0,
-        progress_overlay="0%",
+        progress_overlay="IDLE",
         log_output="No logs yet.",
         default_section_tag="nav_model_config",
         navigation_items=build_navigation_items(),
@@ -298,6 +318,199 @@ def apply_windows_viewport_title(
     return True
 
 
+def _hex_to_rgba(color: str, alpha: int = 255) -> tuple[int, int, int, int]:
+    value = color.lstrip("#")
+    if len(value) != 6:
+        raise ValueError(f"Unsupported color value: {color}")
+
+    return tuple(int(value[index:index + 2], 16) for index in (0, 2, 4)) + (alpha,)
+
+
+def _add_theme_color_if_supported(dpg: object, target: object, color: str) -> None:
+    if target is None:
+        return
+    dpg.add_theme_color(target, _hex_to_rgba(color))
+
+
+def _add_theme_style_if_supported(dpg: object, target: object, value_x: float, value_y: float | None = None) -> None:
+    if target is None:
+        return
+    if value_y is None:
+        dpg.add_theme_style(target, value_x)
+        return
+    dpg.add_theme_style(target, value_x, value_y)
+
+
+def _create_app_themes(dpg: object) -> None:
+    if dpg.does_item_exist("app_global_theme"):
+        return
+
+    palette = build_app_design_palette()
+
+    with dpg.theme(tag="app_global_theme"):
+        with dpg.theme_component(dpg.mvAll):
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_WindowBg", None), palette.background)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ChildBg", None), palette.panel)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_PopupBg", None), palette.sidebar)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Border", None), palette.border)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_FrameBg", None), palette.surface)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_FrameBgHovered", None), palette.surface_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_FrameBgActive", None), palette.surface_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Button", None), palette.surface_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonHovered", None), palette.accent_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonActive", None), palette.accent)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Header", None), palette.surface)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_HeaderHovered", None), palette.surface_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_HeaderActive", None), palette.surface_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Text", None), palette.text_primary)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_TextDisabled", None), palette.text_muted)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_CheckMark", None), palette.accent)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_SliderGrab", None), palette.accent_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_SliderGrabActive", None), palette.accent)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_WindowPadding", None), 18, 18)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_FramePadding", None), 12, 10)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_CellPadding", None), 10, 8)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_ItemSpacing", None), 12, 10)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_WindowBorderSize", None), 0)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_FrameRounding", None), 10)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_ChildRounding", None), 14)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_GrabRounding", None), 10)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_ScrollbarRounding", None), 10)
+
+    with dpg.theme(tag="app_card_theme"):
+        with dpg.theme_component(dpg.mvChildWindow):
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ChildBg", None), palette.panel)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Border", None), palette.border)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_ChildBorderSize", None), 1)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_ChildRounding", None), 16)
+
+    with dpg.theme(tag="app_console_theme"):
+        with dpg.theme_component(dpg.mvInputText):
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_FrameBg", None), palette.console)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Border", None), palette.border)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Text", None), palette.text_primary)
+
+    with dpg.theme(tag="app_nav_button_theme"):
+        with dpg.theme_component(dpg.mvButton):
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Button", None), palette.surface)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonHovered", None), palette.surface_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonActive", None), palette.surface_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Text", None), palette.text_primary)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_FrameRounding", None), 12)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_FramePadding", None), 14, 12)
+
+    with dpg.theme(tag="app_help_button_theme"):
+        with dpg.theme_component(dpg.mvButton):
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Button", None), palette.surface_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonHovered", None), palette.accent_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonActive", None), palette.accent)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Text", None), palette.text_primary)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_FrameRounding", None), 14)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_FramePadding", None), 6, 4)
+
+    with dpg.theme(tag="app_nav_button_active_theme"):
+        with dpg.theme_component(dpg.mvButton):
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Button", None), palette.accent)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonHovered", None), palette.accent_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonActive", None), palette.accent_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Text", None), palette.background)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_FrameRounding", None), 12)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_FramePadding", None), 14, 12)
+
+    with dpg.theme(tag="app_accent_button_theme"):
+        with dpg.theme_component(dpg.mvButton):
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Button", None), palette.accent)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonHovered", None), palette.accent_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonActive", None), palette.accent_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Text", None), palette.background)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_FrameRounding", None), 12)
+            _add_theme_style_if_supported(dpg, getattr(dpg, "mvStyleVar_FramePadding", None), 14, 12)
+
+    with dpg.theme(tag="app_splitter_theme"):
+        with dpg.theme_component(dpg.mvButton):
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_Button", None), palette.surface_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonHovered", None), palette.accent_alt)
+            _add_theme_color_if_supported(dpg, getattr(dpg, "mvThemeCol_ButtonActive", None), palette.accent)
+
+
+def _bind_theme_if_exists(dpg: object, item_tag: str, theme_tag: str) -> None:
+    if dpg.does_item_exist(item_tag) and dpg.does_item_exist(theme_tag):
+        dpg.bind_item_theme(item_tag, theme_tag)
+
+
+def _update_section_hero(dpg: object, section_tag: str) -> None:
+    hero_state = build_section_hero_state(section_tag)
+    for tag, value in (
+        ("active_section_eyebrow", hero_state.eyebrow),
+        ("active_section_title", hero_state.title),
+        ("active_section_description", hero_state.description),
+        ("active_section_supporting_text", hero_state.supporting_text),
+    ):
+        if dpg.does_item_exist(tag):
+            dpg.set_value(tag, value)
+
+
+def _sync_navigation_button_state(dpg: object, active_section_tag: str) -> None:
+    for item_tag in _SECTION_PANEL_TAGS:
+        theme_tag = "app_nav_button_active_theme" if item_tag == active_section_tag else "app_nav_button_theme"
+        _bind_theme_if_exists(dpg, item_tag, theme_tag)
+
+
+def _estimate_expected_sample_count_from_inputs(dpg: object) -> int | None:
+    required_tags = (
+        "niah_context_lengths_num_intervals",
+        "niah_document_depth_percent_intervals",
+        "niah_subset_english",
+        "niah_subset_chinese",
+    )
+    if not all(dpg.does_item_exist(tag) for tag in required_tags):
+        return None
+
+    context_interval_count = int(dpg.get_value("niah_context_lengths_num_intervals") or 0)
+    depth_interval_count = int(dpg.get_value("niah_document_depth_percent_intervals") or 0)
+    subset_count = int(bool(dpg.get_value("niah_subset_english"))) + int(bool(dpg.get_value("niah_subset_chinese")))
+    if context_interval_count <= 0 or depth_interval_count <= 0 or subset_count <= 0:
+        return None
+
+    return context_interval_count * depth_interval_count * subset_count
+
+
+def _update_niah_overview_metrics(dpg: object, store: ModelConfigStore | None) -> None:
+    if store is None:
+        selected_model_names: tuple[str, ...] = ()
+    else:
+        selected_model_names = _get_selected_niah_model_display_names(dpg, store)
+
+    judge_model_name = ""
+    if dpg.does_item_exist("niah_judge_model_config_list"):
+        judge_model_name = str(dpg.get_value("niah_judge_model_config_list") or "").strip()
+
+    show_score = bool(dpg.get_value("niah_show_score")) if dpg.does_item_exist("niah_show_score") else False
+    metrics = build_niah_overview_metrics(
+        selected_model_names=selected_model_names,
+        judge_model_name=judge_model_name,
+        expected_sample_count=_estimate_expected_sample_count_from_inputs(dpg),
+        show_score=show_score,
+    )
+
+    for index, metric in enumerate(metrics):
+        label_tag = f"niah_overview_metric_label_{index}"
+        value_tag = f"niah_overview_metric_value_{index}"
+        detail_tag = f"niah_overview_metric_detail_{index}"
+        if dpg.does_item_exist(label_tag):
+            dpg.set_value(label_tag, metric.label)
+        if dpg.does_item_exist(value_tag):
+            dpg.set_value(value_tag, metric.value)
+        if dpg.does_item_exist(detail_tag):
+            dpg.set_value(detail_tag, metric.detail)
+
+
+def _handle_niah_configuration_changed(_sender: object, _app_data: object, user_data: object) -> None:
+    import dearpygui.dearpygui as dpg
+
+    _update_niah_overview_metrics(dpg, user_data)
+
+
 def _set_status_text(dpg: object, message: str) -> None:
     if dpg.does_item_exist("status_bar"):
         dpg.set_value("status_bar", message)
@@ -357,12 +570,15 @@ def _refresh_model_config_list(
         if dpg.does_item_exist("niah_judge_model_config_list") and not dpg.get_value("niah_judge_model_config_list"):
             dpg.set_value("niah_judge_model_config_list", selected_display_name)
 
+    _update_niah_overview_metrics(dpg, store)
+
 
 def _show_section(dpg: object, section_tag: str) -> None:
     for navigation_tag, panel_tag in _SECTION_PANEL_TAGS.items():
         dpg.configure_item(panel_tag, show=navigation_tag == section_tag)
 
-    dpg.set_value("active_section_title", _SECTION_TITLES[section_tag])
+    _update_section_hero(dpg, section_tag)
+    _sync_navigation_button_state(dpg, section_tag)
 
 
 def _handle_navigation(_sender: object, _app_data: object, user_data: object) -> None:
@@ -429,16 +645,134 @@ def _handle_select_model_config(_sender: object, app_data: object, user_data: ob
     _set_status_text(dpg, f"Loaded config {config.display_name}")
 
 
-def _build_model_config_panel(dpg: object, store: ModelConfigStore) -> None:
-    with dpg.child_window(tag="section_model_config", border=False, autosize_x=True):
-        dpg.add_text("模型 API 配置")
-        dpg.add_text("本地配置将保存在当前用户目录下，并在 Windows 上使用系统凭据保护。")
-        for note in build_model_config_usage_notes():
-            dpg.add_text(f"- {note}")
+def _add_help_button(
+    dpg: object,
+    button_tag: str,
+    payload: HelpPopupPayload,
+) -> None:
+    disclosure_state = build_help_disclosure_state()
+    dpg.add_button(
+        label=disclosure_state.label,
+        tag=button_tag,
+        width=28,
+        height=28,
+        callback=_open_help_popup,
+        user_data=payload,
+    )
+    _bind_theme_if_exists(dpg, button_tag, "app_help_button_theme")
+    with dpg.tooltip(button_tag):
+        tooltip_text = summarize_help_text(
+            " ".join(part for part in (payload.description, payload.supporting_text) if part),
+            max_chars=disclosure_state.summary_max_chars,
+        )
+        dpg.add_text(tooltip_text)
+
+
+def _ensure_help_popup_window(dpg: object) -> None:
+    if dpg.does_item_exist("app_help_popup_window"):
+        return
+
+    with dpg.window(
+        tag="app_help_popup_window",
+        popup=True,
+        show=False,
+        no_title_bar=True,
+        no_resize=True,
+        no_move=True,
+        no_saved_settings=True,
+        autosize=True,
+    ):
+        dpg.add_text("", tag="app_help_popup_title")
+        dpg.add_separator()
+        dpg.add_text("", tag="app_help_popup_description", wrap=_SECTION_HERO_WRAP)
+        dpg.add_spacer(height=6, tag="app_help_popup_spacer")
+        dpg.add_text("", tag="app_help_popup_supporting", wrap=_SECTION_HERO_WRAP)
+
+
+def _open_help_popup(_sender: object, _app_data: object, user_data: object) -> None:
+    import dearpygui.dearpygui as dpg
+
+    payload = user_data if isinstance(user_data, HelpPopupPayload) else None
+    if payload is None:
+        return
+
+    _ensure_help_popup_window(dpg)
+    dpg.set_value("app_help_popup_title", payload.title)
+    dpg.set_value("app_help_popup_description", payload.description)
+    dpg.set_value("app_help_popup_supporting", payload.supporting_text)
+    dpg.configure_item("app_help_popup_description", wrap=payload.wrap)
+    dpg.configure_item("app_help_popup_supporting", wrap=payload.wrap, show=bool(payload.supporting_text))
+    dpg.configure_item("app_help_popup_spacer", show=bool(payload.supporting_text))
+
+    mouse_x, mouse_y = dpg.get_mouse_pos(local=False)
+    popup_position = (int(mouse_x) + 12, int(mouse_y) + 12)
+    dpg.configure_item("app_help_popup_window", pos=popup_position, show=True)
+
+
+def _add_card_heading(
+    dpg: object,
+    eyebrow: str,
+    title: str,
+    description: str,
+    help_tag_prefix: str,
+) -> None:
+    dpg.add_text(eyebrow)
+    with dpg.group(horizontal=True):
+        dpg.add_text(title)
+        _add_help_button(
+            dpg,
+            button_tag=f"{help_tag_prefix}_help_button",
+            payload=HelpPopupPayload(
+                title=title,
+                description=description,
+            ),
+        )
+
+
+def _build_section_hero(dpg: object, section_tag: str) -> None:
+    hero_state = build_section_hero_state(section_tag)
+    with dpg.group(tag="section_hero_card"):
+        dpg.add_text(hero_state.eyebrow, tag="active_section_eyebrow")
+        with dpg.group(horizontal=True):
+            dpg.add_text(hero_state.title, tag="active_section_title")
+            _add_help_button(
+                dpg,
+                button_tag="active_section_help_button",
+                payload=HelpPopupPayload(
+                    title=hero_state.title,
+                    description=hero_state.description,
+                    supporting_text=hero_state.supporting_text,
+                    wrap=_SECTION_HERO_WRAP,
+                ),
+            )
         dpg.add_separator()
 
+
+def _build_niah_overview_metric_cards(dpg: object) -> None:
+    metrics = build_niah_overview_metrics()
+    with dpg.group(horizontal=True):
+        for index, metric in enumerate(metrics):
+            card_tag = f"niah_overview_metric_card_{index}"
+            with dpg.child_window(tag=card_tag, border=True, width=190, autosize_y=True):
+                dpg.add_text(metric.label, tag=f"niah_overview_metric_label_{index}")
+                dpg.add_text(metric.value, tag=f"niah_overview_metric_value_{index}")
+                dpg.add_text(metric.detail, tag=f"niah_overview_metric_detail_{index}", wrap=150)
+            _bind_theme_if_exists(dpg, card_tag, "app_card_theme")
+
+
+def _build_model_config_panel(dpg: object, store: ModelConfigStore) -> None:
+    with dpg.group(tag="section_model_config", show=True):
         with dpg.group(horizontal=True):
-            with dpg.child_window(width=460, border=False, autosize_y=True):
+            with dpg.child_window(tag="model_config_form_card", width=660, border=True, autosize_y=True):
+                _add_card_heading(
+                    dpg,
+                    "PRIMARY INPUTS",
+                    "接入参数",
+                    "直接填写四个字段并保存。这个区域只负责采集与回填，不承载额外说明面板。",
+                    help_tag_prefix="model_config_form_card",
+                )
+                dpg.add_text("本地配置默认保存在当前用户目录；Windows 下会使用系统凭据保护 API Key。", wrap=_CARD_TEXT_WRAP)
+                dpg.add_spacer(height=8)
                 for field in build_model_config_field_specs():
                     dpg.add_text(field.label)
                     dpg.add_input_text(
@@ -467,19 +801,27 @@ def _build_model_config_panel(dpg: object, store: ModelConfigStore) -> None:
                         user_data=store,
                     )
                 dpg.add_text("保存后可以从右侧列表选择配置，自动回填到左侧表单。")
+            _bind_theme_if_exists(dpg, "model_config_form_card", "app_card_theme")
 
-            with dpg.child_window(border=True, autosize_x=True, height=220):
-                dpg.add_text("已保存配置")
+            with dpg.child_window(tag="model_config_list_card", border=True, autosize_x=True, autosize_y=True):
+                _add_card_heading(
+                    dpg,
+                    "REGISTRY",
+                    "已保存配置",
+                    "单击列表项即可回填左侧表单，适合在多个供应商或多套环境之间快速切换。",
+                    help_tag_prefix="model_config_list_card",
+                )
                 dpg.add_listbox(
                     tag="config_list",
                     items=[],
                     width=-1,
-                    num_items=8,
+                    num_items=12,
                     callback=_handle_select_model_config,
                     user_data=store,
                 )
                 dpg.add_text("暂无已保存配置", tag="config_list_hint")
                 dpg.add_text("点击某一项后，左侧会显示该配置的详细内容。")
+            _bind_theme_if_exists(dpg, "model_config_list_card", "app_card_theme")
 
         _refresh_model_config_list(dpg, store)
         _set_model_config_form_values(dpg)
@@ -560,6 +902,7 @@ def _handle_toggle_niah_model_selection(_sender: object, _app_data: object, user
 
     store = user_data
     _update_niah_model_selection_summary(dpg, _get_selected_niah_model_display_names(dpg, store))
+    _update_niah_overview_metrics(dpg, store)
 
 
 def _set_all_niah_model_selection(dpg: object, store: ModelConfigStore, selected: bool) -> None:
@@ -572,6 +915,7 @@ def _set_all_niah_model_selection(dpg: object, store: ModelConfigStore, selected
             all_display_names.append(config.display_name)
 
     _update_niah_model_selection_summary(dpg, tuple(all_display_names) if selected else ())
+    _update_niah_overview_metrics(dpg, store)
 
 
 def _handle_select_all_niah_models(_sender: object, _app_data: object, user_data: object) -> None:
@@ -642,6 +986,9 @@ def _get_niah_layout_metrics(expanded: bool) -> tuple[int, int, int]:
 
 
 def _apply_niah_panel_layout(dpg: object, expanded: bool) -> None:
+    if not dpg.does_item_exist("niah_main_splitter"):
+        return
+
     top_panel_height, _summary_height, _heatmap_height = _get_niah_layout_metrics(expanded)
 
     for tag in ("niah_left_panel", "niah_right_panel", "niah_main_splitter"):
@@ -725,6 +1072,9 @@ def _get_niah_top_panel_height(dpg: object) -> int:
 
 
 def _apply_niah_dynamic_layout(dpg: object, runtime: AppRuntimeState) -> None:
+    if not dpg.does_item_exist("niah_main_split_group"):
+        return
+
     container_width = _get_niah_section_width(dpg)
     if container_width <= 0:
         return
@@ -1446,6 +1796,8 @@ def _add_niah_help_text(dpg: object, message: str) -> None:
 def _build_niah_numeric_group(
     dpg: object,
     fields: tuple[tuple[str, str, int, int | None, int | None], ...],
+    callback: Callable[[object, object, object], None] | None = None,
+    user_data: object | None = None,
 ) -> None:
     with dpg.table(
         header_row=False,
@@ -1476,191 +1828,248 @@ def _build_niah_numeric_group(
                     if max_value is not None:
                         kwargs["max_value"] = max_value
                         kwargs["max_clamped"] = True
+                    if callback is not None:
+                        kwargs["callback"] = callback
+                        kwargs["user_data"] = user_data
                     dpg.add_input_int(**kwargs)
 
 
 def _build_niah_panel(dpg: object, runtime: AppRuntimeState, show: bool) -> None:
     state = build_niah_panel_state()
     spec_map = {spec.tag: spec for spec in build_niah_parameter_specs()}
-    with dpg.child_window(tag="section_test_tasks", border=False, autosize_x=True, show=show):
-        dpg.add_text("捞针测试")
-        dpg.add_text("选择待测模型与裁判模型，配置长上下文检索参数后在后台运行 EvalScope。")
-        dpg.add_separator()
+    left_column_weight, right_column_weight = build_niah_column_weights()
+    with dpg.group(tag="section_test_tasks", show=show):
+        with dpg.table(
+            header_row=False,
+            policy=getattr(dpg, "mvTable_SizingStretchProp", 0),
+            borders_innerV=False,
+            borders_outerV=False,
+            borders_innerH=False,
+            borders_outerH=False,
+            no_host_extendX=True,
+            no_pad_outerX=True,
+            tag="niah_main_layout_table",
+        ):
+            dpg.add_table_column(init_width_or_weight=left_column_weight, width_stretch=True)
+            dpg.add_table_column(init_width_or_weight=right_column_weight, width_stretch=True)
+            with dpg.table_row():
+                with dpg.child_window(tag="niah_left_panel", border=True, width=-1, autosize_y=True):
+                    _add_card_heading(
+                        dpg,
+                        "CONTROL STACK",
+                        "模型与参数控制",
+                        "先锁定待测模型与裁判模型，再配置长上下文网格参数，最后启动批量执行。页面只保留一个纵向滚动区。",
+                        help_tag_prefix="niah_left_panel",
+                    )
+                    dpg.add_spacer(height=6)
+                    dpg.add_text(spec_map["niah_model_config_list"].label)
+                    with dpg.child_window(tag="niah_model_config_list", border=True, height=180, autosize_x=True):
+                        pass
+                    dpg.add_text("已选 0 个模型", tag="niah_model_selection_summary", wrap=500)
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(
+                            label="全选",
+                            tag="niah_select_all_models_button",
+                            callback=_handle_select_all_niah_models,
+                            user_data=runtime.store,
+                        )
+                        dpg.add_button(
+                            label="清空",
+                            tag="niah_clear_models_button",
+                            callback=_handle_clear_niah_models,
+                            user_data=runtime.store,
+                        )
+                    _add_niah_help_text(dpg, spec_map["niah_model_config_list"].help_text)
 
-        with dpg.group(horizontal=True, tag="niah_main_split_group"):
-            with dpg.child_window(tag="niah_left_panel", border=False, height=_NIAH_TOP_PANEL_HEIGHT_EXPANDED):
-                dpg.add_text("模型选择")
-                dpg.add_text(spec_map["niah_model_config_list"].label)
-                with dpg.child_window(tag="niah_model_config_list", border=True, height=140, autosize_x=True):
-                    pass
-                dpg.add_text("已选 0 个模型", tag="niah_model_selection_summary", wrap=500)
-                with dpg.group(horizontal=True):
-                    dpg.add_button(
-                        label="全选",
-                        tag="niah_select_all_models_button",
-                        callback=_handle_select_all_niah_models,
+                    dpg.add_text(spec_map["niah_judge_model_config_list"].label)
+                    dpg.add_listbox(
+                        tag="niah_judge_model_config_list",
+                        items=[],
+                        width=-1,
+                        num_items=5,
+                        callback=_handle_niah_configuration_changed,
                         user_data=runtime.store,
                     )
-                    dpg.add_button(
-                        label="清空",
-                        tag="niah_clear_models_button",
-                        callback=_handle_clear_niah_models,
+                    _add_niah_help_text(dpg, spec_map["niah_judge_model_config_list"].help_text)
+                    dpg.add_spacer(height=8)
+
+                    dpg.add_text("基础参数")
+                    dpg.add_text(spec_map["niah_retrieval_question"].label)
+                    dpg.add_input_text(
+                        tag="niah_retrieval_question",
+                        width=-1,
+                        default_value=state.retrieval_question,
+                    )
+                    _add_niah_help_text(dpg, spec_map["niah_retrieval_question"].help_text)
+
+                    dpg.add_text("Needles（每行一个）")
+                    dpg.add_input_text(
+                        tag="niah_needles_text",
+                        width=-1,
+                        height=96,
+                        multiline=True,
+                        no_horizontal_scroll=True,
+                        default_value=state.needles_text,
+                    )
+                    _add_niah_help_text(dpg, spec_map["niah_needles_text"].help_text)
+
+                    dpg.add_text("Tokenizer Path")
+                    dpg.add_input_text(
+                        tag="niah_tokenizer_path",
+                        width=-1,
+                        default_value=state.tokenizer_path,
+                    )
+                    _add_niah_help_text(dpg, spec_map["niah_tokenizer_path"].help_text)
+
+                    dpg.add_spacer(height=8)
+                    dpg.add_text("维度控制")
+                    _add_niah_help_text(dpg, spec_map["niah_context_lengths_num_intervals"].help_text)
+                    _build_niah_numeric_group(
+                        dpg,
+                        fields=(
+                            ("niah_context_lengths_min", "最小 Token 长度", state.context_lengths_min, 1, None),
+                            ("niah_context_lengths_max", "最大 Token 长度", state.context_lengths_max, 1, None),
+                            (
+                                "niah_context_lengths_num_intervals",
+                                "长度区间数",
+                                state.context_lengths_num_intervals,
+                                1,
+                                None,
+                            ),
+                        ),
+                        callback=_handle_niah_configuration_changed,
                         user_data=runtime.store,
                     )
-                _add_niah_help_text(dpg, spec_map["niah_model_config_list"].help_text)
 
-                dpg.add_text(spec_map["niah_judge_model_config_list"].label)
-                dpg.add_listbox(tag="niah_judge_model_config_list", items=[], width=-1, num_items=5)
-                _add_niah_help_text(dpg, spec_map["niah_judge_model_config_list"].help_text)
-                dpg.add_spacer(height=8)
-
-                dpg.add_text("基础参数")
-                dpg.add_text(spec_map["niah_retrieval_question"].label)
-                dpg.add_input_text(
-                    tag="niah_retrieval_question",
-                    width=-1,
-                    default_value=state.retrieval_question,
-                )
-                _add_niah_help_text(dpg, spec_map["niah_retrieval_question"].help_text)
-
-                dpg.add_text("Needles（每行一个）")
-                dpg.add_input_text(
-                    tag="niah_needles_text",
-                    width=-1,
-                    height=120,
-                    multiline=True,
-                    no_horizontal_scroll=True,
-                    default_value=state.needles_text,
-                )
-                _add_niah_help_text(dpg, spec_map["niah_needles_text"].help_text)
-
-                dpg.add_text("Tokenizer Path")
-                dpg.add_input_text(
-                    tag="niah_tokenizer_path",
-                    width=-1,
-                    default_value=state.tokenizer_path,
-                )
-                _add_niah_help_text(dpg, spec_map["niah_tokenizer_path"].help_text)
-
-                dpg.add_spacer(height=8)
-                dpg.add_text("维度控制")
-                _add_niah_help_text(dpg, spec_map["niah_context_lengths_num_intervals"].help_text)
-                _build_niah_numeric_group(
-                    dpg,
-                    fields=(
-                        ("niah_context_lengths_min", "最小 Token 长度", state.context_lengths_min, 1, None),
-                        ("niah_context_lengths_max", "最大 Token 长度", state.context_lengths_max, 1, None),
-                        (
-                            "niah_context_lengths_num_intervals",
-                            "长度区间数",
-                            state.context_lengths_num_intervals,
-                            1,
-                            None,
+                    _add_niah_help_text(dpg, spec_map["niah_document_depth_percent_intervals"].help_text)
+                    _build_niah_numeric_group(
+                        dpg,
+                        fields=(
+                            (
+                                "niah_document_depth_percent_min",
+                                "最小深度 %",
+                                state.document_depth_percent_min,
+                                0,
+                                100,
+                            ),
+                            (
+                                "niah_document_depth_percent_max",
+                                "最大深度 %",
+                                state.document_depth_percent_max,
+                                0,
+                                100,
+                            ),
+                            (
+                                "niah_document_depth_percent_intervals",
+                                "深度区间数",
+                                state.document_depth_percent_intervals,
+                                1,
+                                None,
+                            ),
                         ),
-                    ),
-                )
-
-                _add_niah_help_text(dpg, spec_map["niah_document_depth_percent_intervals"].help_text)
-                _build_niah_numeric_group(
-                    dpg,
-                    fields=(
-                        (
-                            "niah_document_depth_percent_min",
-                            "最小深度 %",
-                            state.document_depth_percent_min,
-                            0,
-                            100,
-                        ),
-                        (
-                            "niah_document_depth_percent_max",
-                            "最大深度 %",
-                            state.document_depth_percent_max,
-                            0,
-                            100,
-                        ),
-                        (
-                            "niah_document_depth_percent_intervals",
-                            "深度区间数",
-                            state.document_depth_percent_intervals,
-                            1,
-                            None,
-                        ),
-                    ),
-                )
-
-                dpg.add_spacer(height=8)
-                dpg.add_text("语料与显示")
-                with dpg.group(horizontal=True):
-                    dpg.add_checkbox(label="英文语料", tag="niah_subset_english", default_value=True)
-                    dpg.add_checkbox(label="中文语料", tag="niah_subset_chinese", default_value=True)
-                    dpg.add_checkbox(label="热力图显示数值", tag="niah_show_score", default_value=state.show_score)
-                _add_niah_help_text(dpg, spec_map["niah_subset_english"].help_text)
-
-                dpg.add_spacer(height=8)
-                dpg.add_button(
-                    label=state.run_button_label,
-                    tag="niah_run_button",
-                    callback=_handle_run_niah,
-                    user_data=runtime,
-                )
-                dpg.add_text(state.status_text, tag="niah_panel_status", wrap=500)
-
-            dpg.add_button(label=" ", tag="niah_main_splitter", width=_NIAH_MAIN_SPLITTER_WIDTH, height=_NIAH_TOP_PANEL_HEIGHT_EXPANDED)
-
-            with dpg.child_window(tag="niah_right_panel", border=True, height=_NIAH_TOP_PANEL_HEIGHT_EXPANDED):
-                dpg.add_text("执行与展示")
-                with dpg.group(horizontal=True):
-                    dpg.add_button(
-                        label="打开 HTML 报告",
-                        tag="niah_open_report_button",
-                        callback=_open_niah_report,
-                        enabled=False,
+                        callback=_handle_niah_configuration_changed,
+                        user_data=runtime.store,
                     )
-                    dpg.add_combo(
-                        tag="niah_heatmap_model_selector",
-                        items=(),
-                        width=240,
-                        label="",
-                        callback=_handle_select_niah_heatmap_model,
+
+                    dpg.add_spacer(height=8)
+                    dpg.add_text("语料与显示")
+                    with dpg.group(horizontal=True):
+                        dpg.add_checkbox(
+                            label="英文语料",
+                            tag="niah_subset_english",
+                            default_value=True,
+                            callback=_handle_niah_configuration_changed,
+                            user_data=runtime.store,
+                        )
+                        dpg.add_checkbox(
+                            label="中文语料",
+                            tag="niah_subset_chinese",
+                            default_value=True,
+                            callback=_handle_niah_configuration_changed,
+                            user_data=runtime.store,
+                        )
+                        dpg.add_checkbox(
+                            label="热力图显示数值",
+                            tag="niah_show_score",
+                            default_value=state.show_score,
+                            callback=_handle_niah_configuration_changed,
+                            user_data=runtime.store,
+                        )
+                    _add_niah_help_text(dpg, spec_map["niah_subset_english"].help_text)
+
+                    dpg.add_spacer(height=8)
+                    dpg.add_button(
+                        label=state.run_button_label,
+                        tag="niah_run_button",
+                        callback=_handle_run_niah,
                         user_data=runtime,
-                        enabled=False,
                     )
-                dpg.add_separator()
-                dpg.add_input_text(
-                    default_value="尚未运行捞针测试。",
-                    tag="niah_result_summary",
-                    multiline=True,
-                    readonly=True,
-                    width=-1,
-                    height=_NIAH_SUMMARY_HEIGHT_EXPANDED,
-                    no_horizontal_scroll=True,
-                )
-                dpg.add_button(label=" ", tag="niah_result_splitter", width=-1, height=_NIAH_RESULT_SPLITTER_HEIGHT)
-                with dpg.plot(
-                    label="检索热力图",
-                    tag="niah_heatmap_plot",
-                    height=_NIAH_HEATMAP_HEIGHT_EXPANDED,
-                    width=-1,
-                    no_menus=True,
-                    no_mouse_pos=True,
-                ):
-                    dpg.add_plot_axis(dpg.mvXAxis, label="上下文长度", tag="niah_heatmap_x_axis")
-                    dpg.add_plot_axis(dpg.mvYAxis, label="文档深度 (%)", tag="niah_heatmap_y_axis")
+                    dpg.add_text(state.status_text, tag="niah_panel_status", wrap=500)
+
+                with dpg.child_window(tag="niah_right_panel", border=True, width=-1, autosize_y=True):
+                    _add_card_heading(
+                        dpg,
+                        "LIVE RESULTS",
+                        "执行与展示",
+                        "先看任务概览，再读运行摘要与热力图；整个区域面向正在运行和刚完成的批量任务。",
+                        help_tag_prefix="niah_right_panel",
+                    )
+                    dpg.add_spacer(height=6)
+                    _build_niah_overview_metric_cards(dpg)
+                    dpg.add_spacer(height=6)
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(
+                            label="打开 HTML 报告",
+                            tag="niah_open_report_button",
+                            callback=_open_niah_report,
+                            enabled=False,
+                        )
+                        dpg.add_combo(
+                            tag="niah_heatmap_model_selector",
+                            items=(),
+                            width=240,
+                            label="",
+                            callback=_handle_select_niah_heatmap_model,
+                            user_data=runtime,
+                            enabled=False,
+                        )
+                    dpg.add_separator()
+                    dpg.add_input_text(
+                        default_value="尚未运行捞针测试。",
+                        tag="niah_result_summary",
+                        multiline=True,
+                        readonly=True,
+                        width=-1,
+                        height=180,
+                        no_horizontal_scroll=True,
+                    )
+                    with dpg.plot(
+                        label="检索热力图",
+                        tag="niah_heatmap_plot",
+                        height=320,
+                        width=-1,
+                        no_menus=True,
+                        no_mouse_pos=True,
+                    ):
+                        dpg.add_plot_axis(dpg.mvXAxis, label="上下文长度", tag="niah_heatmap_x_axis")
+                        dpg.add_plot_axis(dpg.mvYAxis, label="文档深度 (%)", tag="niah_heatmap_y_axis")
+        _bind_theme_if_exists(dpg, "niah_right_panel", "app_card_theme")
+        _bind_theme_if_exists(dpg, "niah_open_report_button", "app_nav_button_theme")
 
         _refresh_model_config_list(dpg, runtime.store)
         _refresh_niah_model_selection(dpg, runtime.store, state.selected_model_config_names)
         _set_niah_heatmap_model_selector(dpg, runtime, ())
-        _apply_niah_panel_layout(dpg, expanded=True)
-        _apply_niah_dynamic_layout(dpg, runtime)
         _set_niah_report_action(dpg, None)
         _update_niah_heatmap(dpg, None)
+        _update_niah_overview_metrics(dpg, runtime.store)
 
 
 def _build_placeholder_panel(dpg: object, tag: str, title: str, message: str, show: bool) -> None:
-    with dpg.child_window(tag=tag, border=False, autosize_x=True, show=show):
-        dpg.add_text(title)
-        dpg.add_separator()
-        dpg.add_text(message)
+    with dpg.group(tag=tag, show=show):
+        with dpg.child_window(tag=f"{tag}_card", border=True, autosize_x=True, autosize_y=True):
+            _add_card_heading(dpg, "FUTURE SURFACE", title, message, help_tag_prefix=f"{tag}_card")
+            dpg.add_text("为避免伪实现，该区域在真实结果数据模型接入前只保留信息架构与视觉占位。", wrap=_SECTION_HERO_WRAP)
+        _bind_theme_if_exists(dpg, f"{tag}_card", "app_card_theme")
 
 
 def _get_content_region_height(log_panel_height: int) -> int:
@@ -1690,7 +2099,12 @@ def _handle_toggle_log_panel(_sender: object, _app_data: object, _user_data: obj
 
 def _build_sidebar(dpg: object, shell: AppShell) -> None:
     with dpg.child_window(tag="sidebar_panel", width=shell.navigation_width, border=True):
+        dpg.add_text("CONTROL PLANE")
+        dpg.add_text(shell.brand_title)
+        dpg.add_text(shell.brand_subtitle, wrap=230)
+        dpg.add_spacer(height=10)
         dpg.add_text("导航")
+        dpg.add_text("围绕配置、执行与结果的三段式工作流组织桌面操作。", wrap=230)
         dpg.add_separator()
 
         for item in shell.navigation_items:
@@ -1701,6 +2115,9 @@ def _build_sidebar(dpg: object, shell: AppShell) -> None:
                 callback=_handle_navigation,
                 user_data=item.tag,
             )
+            _bind_theme_if_exists(dpg, item.tag, "app_nav_button_theme")
+
+    _bind_theme_if_exists(dpg, "sidebar_panel", "app_card_theme")
 
 
 def _build_bottom_panel(dpg: object, shell: AppShell) -> None:
@@ -1713,6 +2130,7 @@ def _build_bottom_panel(dpg: object, shell: AppShell) -> None:
         height=log_panel_state.panel_height,
     ):
         with dpg.group(horizontal=True):
+            dpg.add_text("SYSTEM CONSOLE")
             dpg.add_text("运行日志")
             dpg.add_button(
                 label=log_panel_state.toggle_label,
@@ -1725,6 +2143,7 @@ def _build_bottom_panel(dpg: object, shell: AppShell) -> None:
             height=log_panel_state.log_height,
             show=log_panel_state.show_log_output,
         )
+        _bind_theme_if_exists(dpg, "log_output", "app_console_theme")
         dpg.add_separator(tag="log_panel_separator", show=log_panel_state.show_log_output)
         with dpg.group(horizontal=True):
             add_status_bar(state=build_status_state(shell.status_text))
@@ -1734,6 +2153,9 @@ def _build_bottom_panel(dpg: object, shell: AppShell) -> None:
                     shell.progress_overlay,
                 )
             )
+
+    _bind_theme_if_exists(dpg, "bottom_panel", "app_card_theme")
+    _bind_theme_if_exists(dpg, "log_panel_toggle_button", "app_nav_button_theme")
 
 
 def _build_content_panel(dpg: object, shell: AppShell, store: ModelConfigStore) -> None:
@@ -1751,8 +2173,8 @@ def _build_content_panel(dpg: object, shell: AppShell, store: ModelConfigStore) 
             autosize_x=True,
             height=_get_content_region_height(build_log_panel_state().panel_height),
         ):
-            dpg.add_text(_SECTION_TITLES[shell.default_section_tag], tag="active_section_title")
-            dpg.add_separator()
+            _build_section_hero(dpg, shell.default_section_tag)
+            dpg.add_spacer(height=12)
             _build_model_config_panel(dpg, store)
             _build_niah_panel(dpg, runtime, show=False)
             _build_placeholder_panel(
@@ -1789,6 +2211,7 @@ def launch_app() -> None:
     runtime: AppRuntimeState | None = None
 
     dpg.create_context()
+    _create_app_themes(dpg)
     attach_external_logger("evalscope")
     _bind_default_font(dpg, "ui")
     dpg.create_viewport(title="ai_test_tool", width=shell.width, height=shell.height)
@@ -1810,6 +2233,7 @@ def launch_app() -> None:
             runtime = _build_content_panel(dpg, shell, store)
 
     dpg.setup_dearpygui()
+    dpg.bind_theme("app_global_theme")
     dpg.show_viewport()
     if hasattr(dpg, "maximize_viewport"):
         dpg.maximize_viewport()

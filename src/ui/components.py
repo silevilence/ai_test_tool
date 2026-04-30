@@ -26,6 +26,24 @@ class NavigationItem:
 
 
 @dataclass(frozen=True, slots=True)
+class AppDesignPalette:
+    background: str
+    sidebar: str
+    surface: str
+    surface_alt: str
+    panel: str
+    accent: str
+    accent_alt: str
+    accent_soft: str
+    success: str
+    warning: str
+    border: str
+    text_primary: str
+    text_muted: str
+    console: str
+
+
+@dataclass(frozen=True, slots=True)
 class StatusBarState:
     text: str
 
@@ -114,12 +132,100 @@ class NIAHLayoutDimensions:
     heatmap_height: int
 
 
+@dataclass(frozen=True, slots=True)
+class SectionHeroState:
+    eyebrow: str
+    title: str
+    description: str
+    supporting_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class OverviewMetricState:
+    label: str
+    value: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class HelpDisclosureState:
+    label: str
+    default_open: bool
+    summary_max_chars: int
+
+
 def build_navigation_items() -> tuple[NavigationItem, ...]:
     return (
         NavigationItem(label="模型配置", tag="nav_model_config"),
         NavigationItem(label="测试任务", tag="nav_test_tasks"),
         NavigationItem(label="结果概览", tag="nav_results_overview"),
     )
+
+
+def build_app_design_palette() -> AppDesignPalette:
+    return AppDesignPalette(
+        background="#0F172A",
+        sidebar="#111827",
+        surface="#1E293B",
+        surface_alt="#334155",
+        panel="#162033",
+        accent="#22C55E",
+        accent_alt="#38BDF8",
+        accent_soft="#12352A",
+        success="#22C55E",
+        warning="#F59E0B",
+        border="#334155",
+        text_primary="#F8FAFC",
+        text_muted="#94A3B8",
+        console="#020617",
+    )
+
+
+def build_section_hero_state(section_tag: str) -> SectionHeroState:
+    hero_map = {
+        "nav_model_config": SectionHeroState(
+            eyebrow="MODEL REGISTRY",
+            title="模型配置",
+            description="集中管理本地模型资产、鉴权信息与接入端点，保证联调、评测与批量执行读取同一份可信配置。",
+            supporting_text="Windows 环境默认使用系统凭据保护 API Key；这里更像接入控制面，而不是普通表单。",
+        ),
+        "nav_test_tasks": SectionHeroState(
+            eyebrow="EVAL PIPELINE",
+            title="测试任务",
+            description="围绕长上下文检索评测搭建串行执行控制台，突出模型选择、参数编排、进度跟踪与结果回看。",
+            supporting_text="当前主任务是长上下文检索与捞针测试，适合快速比较多个模型在相同输入网格上的表现。",
+        ),
+        "nav_results_overview": SectionHeroState(
+            eyebrow="RESULTS HUB",
+            title="结果概览",
+            description="这里将承接后续横向汇总与全局结果浏览能力，目前仅保留信息架构与视觉占位，不伪造业务数据。",
+            supporting_text="占位视图保留为真实数据模型接入前的导航落点，避免误导用户认为该能力已经完成。",
+        ),
+    }
+    return hero_map.get(
+        section_tag,
+        SectionHeroState(
+            eyebrow="CONTROL CENTER",
+            title="LLM API 评测工具",
+            description="统一的模型接入、评测执行与结果查看工作台。",
+            supporting_text="",
+        ),
+    )
+
+
+def build_help_disclosure_state(
+    label: str = "?",
+    default_open: bool = False,
+    summary_max_chars: int = 24,
+) -> HelpDisclosureState:
+    return HelpDisclosureState(label=label, default_open=default_open, summary_max_chars=summary_max_chars)
+
+
+def summarize_help_text(text: str, max_chars: int = 24) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[:max_chars].rstrip()}..."
 
 
 def build_status_state(default_value: str = "Ready") -> StatusBarState:
@@ -133,12 +239,12 @@ def build_progress_state(
     return ProgressState(value=default_value, overlay=overlay)
 
 
-def build_log_panel_state(expanded: bool = True) -> LogPanelState:
+def build_log_panel_state(expanded: bool = False) -> LogPanelState:
     if expanded:
         return LogPanelState(
             expanded=True,
-            panel_height=310,
-            log_height=230,
+            panel_height=236,
+            log_height=156,
             status_row_height=28,
             toggle_label="收起日志",
             show_log_output=True,
@@ -339,6 +445,10 @@ def build_niah_layout_state(
     )
 
 
+def build_niah_column_weights() -> tuple[float, float]:
+    return (1.55, 1.0)
+
+
 def resolve_niah_layout_dimensions(
     layout_state: NIAHLayoutState,
     container_width: int,
@@ -383,6 +493,45 @@ def resolve_niah_layout_dimensions(
         top_panel_height=top_panel_height,
         result_summary_height=result_summary_height,
         heatmap_height=heatmap_height,
+    )
+
+
+def build_niah_overview_metrics(
+    selected_model_names: tuple[str, ...] = (),
+    judge_model_name: str = "",
+    expected_sample_count: int | None = None,
+    show_score: bool = False,
+) -> tuple[OverviewMetricState, ...]:
+    selected_models_value = f"{len(selected_model_names)} 个"
+    selected_models_detail = ", ".join(selected_model_names) if selected_model_names else "尚未选择待测模型"
+    judge_value = judge_model_name or "未设置"
+    judge_detail = "用于判定是否命中 needle 的裁判模型"
+    samples_value = str(expected_sample_count) if expected_sample_count is not None else "--"
+    samples_detail = "由上下文长度区间、深度区间与语料子集共同决定"
+    heatmap_value = "显示分数" if show_score else "仅颜色"
+    heatmap_detail = "切换热力图数值叠加，便于快速扫读或精确比较"
+
+    return (
+        OverviewMetricState(
+            label="待测模型",
+            value=selected_models_value,
+            detail=selected_models_detail,
+        ),
+        OverviewMetricState(
+            label="裁判模型",
+            value=judge_value,
+            detail=judge_detail,
+        ),
+        OverviewMetricState(
+            label="预计样本",
+            value=samples_value,
+            detail=samples_detail,
+        ),
+        OverviewMetricState(
+            label="热力图",
+            value=heatmap_value,
+            detail=heatmap_detail,
+        ),
     )
 
 

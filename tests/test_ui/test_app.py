@@ -18,6 +18,8 @@ from ui.app import apply_windows_viewport_title
 from ui.app import build_app_shell
 from ui.app import build_main_window_state
 from ui.components import (
+    build_app_design_palette,
+    build_help_disclosure_state,
     build_navigation_items,
     build_log_panel_state,
     build_model_config_field_specs,
@@ -25,8 +27,10 @@ from ui.components import (
     build_model_config_list_items,
     build_model_config_usage_notes,
     build_progress_state,
+    build_section_hero_state,
     build_status_state,
     format_log_entries,
+    summarize_help_text,
 )
 
 
@@ -34,12 +38,12 @@ def test_build_app_shell_exposes_default_layout_state() -> None:
     shell = build_app_shell()
 
     assert shell.title == "LLM API 评测工具"
-    assert shell.width >= 1024
-    assert shell.height >= 720
-    assert shell.navigation_width == 260
-    assert shell.status_text == "Ready"
+    assert shell.width >= 1500
+    assert shell.height >= 960
+    assert shell.navigation_width == 248
+    assert shell.status_text == "控制台就绪"
     assert shell.progress_value == 0.0
-    assert shell.progress_overlay == "0%"
+    assert shell.progress_overlay == "IDLE"
     assert shell.log_output == "No logs yet."
     assert shell.default_section_tag == "nav_model_config"
     assert [item.label for item in shell.navigation_items] == [
@@ -47,6 +51,43 @@ def test_build_app_shell_exposes_default_layout_state() -> None:
         "测试任务",
         "结果概览",
     ]
+
+
+def test_build_app_design_palette_exposes_dark_console_tokens() -> None:
+    palette = build_app_design_palette()
+
+    assert palette.background == "#0F172A"
+    assert palette.sidebar == "#111827"
+    assert palette.surface == "#1E293B"
+    assert palette.accent == "#22C55E"
+    assert palette.accent_alt == "#38BDF8"
+    assert palette.text_primary == "#F8FAFC"
+    assert palette.text_muted == "#94A3B8"
+
+
+def test_build_section_hero_state_covers_primary_sections() -> None:
+    model_config_hero = build_section_hero_state("nav_model_config")
+    test_tasks_hero = build_section_hero_state("nav_test_tasks")
+    results_hero = build_section_hero_state("nav_results_overview")
+
+    assert model_config_hero.eyebrow == "MODEL REGISTRY"
+    assert "本地模型资产" in model_config_hero.description
+    assert test_tasks_hero.eyebrow == "EVAL PIPELINE"
+    assert "长上下文检索" in test_tasks_hero.description
+    assert results_hero.eyebrow == "RESULTS HUB"
+    assert "占位视图" in results_hero.supporting_text
+
+
+def test_build_help_disclosure_state_defaults_to_collapsed() -> None:
+    disclosure = build_help_disclosure_state()
+
+    assert disclosure.label == "?"
+    assert disclosure.summary_max_chars == 24
+
+
+def test_summarize_help_text_truncates_long_content() -> None:
+    assert summarize_help_text("用于说明帮助按钮的详细用途和上下文信息", max_chars=10) == "用于说明帮助按钮的详..."
+    assert summarize_help_text("简短说明", max_chars=10) == "简短说明"
 
 
 def test_build_main_window_state_fills_the_viewport() -> None:
@@ -117,9 +158,9 @@ def test_component_builders_provide_default_states() -> None:
     assert config_form.base_url == ""
     assert config_form.api_key == ""
     assert config_form.model_name == ""
-    assert log_panel.expanded is True
-    assert log_panel.show_log_output is True
-    assert log_panel.toggle_label == "收起日志"
+    assert log_panel.expanded is False
+    assert log_panel.show_log_output is False
+    assert log_panel.toggle_label == "展开日志"
 
 
 def test_build_log_panel_state_supports_collapsing_without_hiding_status() -> None:
@@ -131,6 +172,8 @@ def test_build_log_panel_state_supports_collapsing_without_hiding_status() -> No
     assert collapsed_panel.toggle_label == "展开日志"
     assert collapsed_panel.panel_height < expanded_panel.panel_height
     assert collapsed_panel.status_row_height > 0
+    assert expanded_panel.panel_height <= 250
+    assert expanded_panel.log_height <= 180
 
 
 def test_build_model_config_list_items_returns_display_names() -> None:
