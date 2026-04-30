@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 from core.config import ModelConfig
+from core.config import ModelConfigStore
 from core.logger import LogEntry
+from tests.base_strategy import EvalResult
+from ui.app import _estimate_niah_expected_sample_count
+from ui.app import _build_niah_batch_result_summary
+from ui.app import _choose_niah_heatmap_model_name
+from ui.app import _iter_niah_editable_control_tags
+from ui.app import _niah_model_selection_tag
+from ui.app import _read_niah_parameters
+from ui.app import _resolve_niah_progress_counts
 from ui.app import apply_windows_viewport_title
 from ui.app import build_app_shell
 from ui.app import build_main_window_state
@@ -173,3 +183,143 @@ def test_format_log_entries_renders_readable_log_lines() -> None:
     assert "INFO" in rendered
     assert "ai_test_tool.ui" in rendered
     assert "UI initialized" in rendered
+
+
+def test_read_niah_parameters_returns_multiple_selected_model_configs() -> None:
+    store = ModelConfigStore()
+    model_alpha = ModelConfig(
+        display_name="Alpha",
+        base_url="https://alpha.example/v1",
+        api_key="alpha-key",
+        model_name="alpha-model",
+    )
+    model_beta = ModelConfig(
+        display_name="Beta",
+        base_url="https://beta.example/v1",
+        api_key="beta-key",
+        model_name="beta-model",
+    )
+    judge = ModelConfig(
+        display_name="Judge",
+        base_url="https://judge.example/v1",
+        api_key="judge-key",
+        model_name="judge-model",
+    )
+    store.upsert(model_alpha)
+    store.upsert(model_beta)
+    store.upsert(judge)
+
+    class FakeDPG:
+        def __init__(self) -> None:
+            self._values = {
+                _niah_model_selection_tag("Alpha"): True,
+                _niah_model_selection_tag("Beta"): True,
+                _niah_model_selection_tag("Judge"): False,
+                "niah_judge_model_config_list": "Judge",
+                "niah_retrieval_question": "Where is the answer?",
+                "niah_needles_text": "needle one\nneedle two",
+                "niah_context_lengths_min": 1024,
+                "niah_context_lengths_max": 4096,
+                "niah_context_lengths_num_intervals": 4,
+                "niah_document_depth_percent_min": 10,
+                "niah_document_depth_percent_max": 90,
+                "niah_document_depth_percent_intervals": 5,
+                "niah_tokenizer_path": "Qwen/Qwen3-0.6B",
+                "niah_show_score": True,
+                "niah_subset_english": True,
+                "niah_subset_chinese": False,
+            }
+
+        def get_value(self, tag: str) -> object:
+            return self._values.get(tag)
+
+    selected_models, parameters = _read_niah_parameters(FakeDPG(), store)
+
+    assert [config.display_name for config in selected_models] == ["Alpha", "Beta"]
+    assert parameters["retrieval_question"] == "Where is the answer?"
+    assert parameters["subset_list"] == ["english"]
+    assert parameters["judge_model"] == {
+        "api_url": "https://judge.example/v1",
+        "api_key": "judge-key",
+        "model_name": "judge-model",
+    }
+
+
+def test_build_niah_batch_result_summary_includes_collection_report() -> None:
+    summary = _build_niah_batch_result_summary(
+        model_results=[
+            (
+                "Alpha",
+                EvalResult(
+                    status="completed",
+                    metrics={"acc": 0.75, "sample_count": 12.0},
+                    artifacts={"outputs_dir": "outputs/run-a"},
+                ),
+                None,
+            ),
+            (
+                "Beta",
+                EvalResult(status="failed", error_message="boom"),
+                "boom",
+            ),
+        ],
+        collection_report_html_path=str(Path("outputs") / "batch-summary" / "reports" / "report.html"),
+    )
+
+    assert "批量任务完成: 1/2 成功" in summary
+    assert "Alpha: completed | acc=75.00% | samples=12" in summary
+    assert "Beta: failed | boom" in summary
+    assert "汇总 HTML 报告" in summary
+
+
+def test_iter_niah_editable_control_tags_targets_real_controls_only() -> None:
+    store = ModelConfigStore()
+    store.upsert(
+        ModelConfig(
+            display_name="Alpha",
+            base_url="https://alpha.example/v1",
+            api_key="alpha-key",
+            model_name="alpha-model",
+        )
+    )
+    store.upsert(
+        ModelConfig(
+            display_name="Beta",
+            base_url="https://beta.example/v1",
+            api_key="beta-key",
+            model_name="beta-model",
+        )
+    )
+
+    tags = _iter_niah_editable_control_tags(store)
+
+    assert "niah_model_config_list" not in tags
+    assert _niah_model_selection_tag("Alpha") in tags
+    assert _niah_model_selection_tag("Beta") in tags
+    assert "niah_run_button" not in tags
+
+
+def test_resolve_niah_progress_counts_prefers_expected_grid_total() -> None:
+    class FakeParameters:
+        context_lengths_num_intervals = 2
+        document_depth_percent_intervals = 2
+        subset_list = ("english",)
+
+    class FakeStrategy:
+        niah_parameters = FakeParameters()
+
+    assert _estimate_niah_expected_sample_count(FakeStrategy()) == 4
+    assert _resolve_niah_progress_counts(
+        FakeStrategy(),
+        {
+            "processed_count": 2,
+            "total_count": 100,
+            "percent": 2.0,
+        },
+    ) == (2, 4, 50.0, 100)
+
+
+def test_choose_niah_heatmap_model_name_prefers_existing_selection() -> None:
+    assert _choose_niah_heatmap_model_name(("DSV4 flash", "DSV4 pro"), "DSV4 pro") == "DSV4 pro"
+    assert _choose_niah_heatmap_model_name(("DSV4 flash", "DSV4 pro"), "missing") == "DSV4 flash"
+    assert _choose_niah_heatmap_model_name((), "missing") is None

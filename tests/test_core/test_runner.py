@@ -81,3 +81,40 @@ def test_task_runner_reports_failed_strategy_execution() -> None:
         assert snapshot.error_message == "boom"
     finally:
         runner.shutdown()
+
+
+def test_task_runner_executes_submitted_strategies_in_queue_order() -> None:
+    runner = TaskRunner()
+    execution_order: list[str] = []
+
+    class OrderedStrategy(RecordingStrategy):
+        def execute(self) -> None:
+            execution_order.append(self.model_config.display_name)
+            super().execute()
+
+    first = OrderedStrategy(
+        model_config=ModelConfig(
+            display_name="Model A",
+            base_url="http://localhost:8000/v1",
+            api_key="secret-a",
+            model_name="model-a",
+        )
+    )
+    second = OrderedStrategy(
+        model_config=ModelConfig(
+            display_name="Model B",
+            base_url="http://localhost:8000/v1",
+            api_key="secret-b",
+            model_name="model-b",
+        )
+    )
+
+    runner.submit_strategy(task_id="niah-batch-1", strategy=first)
+    runner.submit_strategy(task_id="niah-batch-2", strategy=second)
+
+    try:
+        assert runner.wait_for_task("niah-batch-1", timeout=1.0) is True
+        assert runner.wait_for_task("niah-batch-2", timeout=1.0) is True
+        assert execution_order == ["Model A", "Model B"]
+    finally:
+        runner.shutdown()

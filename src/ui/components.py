@@ -73,6 +73,7 @@ class NIAHParameterSpec:
 @dataclass(frozen=True, slots=True)
 class NIAHPanelState:
     model_config_name: str
+    selected_model_config_names: tuple[str, ...]
     judge_model_config_name: str
     retrieval_question: str
     needles_text: str
@@ -96,6 +97,21 @@ class NIAHHeatmapState:
     values: tuple[float, ...]
     rows: int
     cols: int
+
+
+@dataclass(frozen=True, slots=True)
+class NIAHLayoutState:
+    left_panel_width: int
+    result_summary_height: int
+
+
+@dataclass(frozen=True, slots=True)
+class NIAHLayoutDimensions:
+    left_panel_width: int
+    right_panel_width: int
+    top_panel_height: int
+    result_summary_height: int
+    heatmap_height: int
 
 
 def build_navigation_items() -> tuple[NavigationItem, ...]:
@@ -198,6 +214,7 @@ def build_model_config_list_items(
 
 def build_niah_panel_state(
     model_config_name: str = "",
+    selected_model_config_names: tuple[str, ...] = (),
     judge_model_config_name: str = "",
     retrieval_question: str = DEFAULT_RETRIEVAL_QUESTION,
     needles_text: str = "\n".join(DEFAULT_NEEDLES),
@@ -215,6 +232,7 @@ def build_niah_panel_state(
 ) -> NIAHPanelState:
     return NIAHPanelState(
         model_config_name=model_config_name,
+        selected_model_config_names=selected_model_config_names,
         judge_model_config_name=judge_model_config_name,
         retrieval_question=retrieval_question,
         needles_text=needles_text,
@@ -236,8 +254,8 @@ def build_niah_parameter_specs() -> tuple[NIAHParameterSpec, ...]:
     return (
         NIAHParameterSpec(
             tag="niah_model_config_list",
-            label="待测模型配置",
-            help_text="选择需要接受 NIAH 评测的模型配置，实际请求会使用这里的 Base URL、API Key 和 Model Name。",
+            label="待测模型配置（可多选）",
+            help_text="勾选一个或多个需要接受 NIAH 评测的模型配置；批量任务会保持其他参数不变，仅替换这里选中的模型。",
         ),
         NIAHParameterSpec(
             tag="niah_judge_model_config_list",
@@ -308,6 +326,63 @@ def build_niah_heatmap_state(
         values=values,
         rows=len(context_lengths),
         cols=len(depth_percents),
+    )
+
+
+def build_niah_layout_state(
+    left_panel_width: int = 520,
+    result_summary_height: int = 150,
+) -> NIAHLayoutState:
+    return NIAHLayoutState(
+        left_panel_width=left_panel_width,
+        result_summary_height=result_summary_height,
+    )
+
+
+def resolve_niah_layout_dimensions(
+    layout_state: NIAHLayoutState,
+    container_width: int,
+    top_panel_height: int,
+    horizontal_padding: int = 16,
+    splitter_width: int = 10,
+    result_splitter_height: int = 10,
+    right_panel_chrome_height: int = 80,
+    min_left_panel_width: int = 320,
+    min_right_panel_width: int = 360,
+    min_result_summary_height: int = 120,
+    min_heatmap_height: int = 180,
+) -> NIAHLayoutDimensions:
+    available_width = max(
+        min_left_panel_width + splitter_width + min_right_panel_width,
+        container_width - horizontal_padding,
+    )
+    max_left_panel_width = max(
+        min_left_panel_width,
+        available_width - splitter_width - min_right_panel_width,
+    )
+    left_panel_width = min(max(layout_state.left_panel_width, min_left_panel_width), max_left_panel_width)
+    right_panel_width = available_width - splitter_width - left_panel_width
+
+    available_result_height = max(
+        min_result_summary_height + result_splitter_height + min_heatmap_height,
+        top_panel_height - right_panel_chrome_height,
+    )
+    max_result_summary_height = max(
+        min_result_summary_height,
+        available_result_height - result_splitter_height - min_heatmap_height,
+    )
+    result_summary_height = min(
+        max(layout_state.result_summary_height, min_result_summary_height),
+        max_result_summary_height,
+    )
+    heatmap_height = available_result_height - result_splitter_height - result_summary_height
+
+    return NIAHLayoutDimensions(
+        left_panel_width=left_panel_width,
+        right_panel_width=right_panel_width,
+        top_panel_height=top_panel_height,
+        result_summary_height=result_summary_height,
+        heatmap_height=heatmap_height,
     )
 
 

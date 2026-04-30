@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from ui.app import read_evalscope_progress_state
 from ui.components import build_niah_heatmap_state
+from ui.components import build_niah_layout_state
 from ui.components import build_niah_parameter_specs
 from ui.components import build_niah_panel_state
+from ui.components import resolve_niah_layout_dimensions
 
 
 def test_build_niah_panel_state_exposes_expected_defaults() -> None:
     state = build_niah_panel_state()
 
     assert state.model_config_name == ""
+    assert state.selected_model_config_names == ()
     assert state.judge_model_config_name == ""
     assert state.retrieval_question == "What is the best thing to do in San Francisco?"
     assert state.needles_text.startswith("The best thing to do in San Francisco")
@@ -40,6 +43,21 @@ def test_build_niah_heatmap_state_builds_dense_matrix_from_sparse_points() -> No
     assert heatmap.values == (1.0, 0.8, 0.0, 0.2)
     assert heatmap.rows == 2
     assert heatmap.cols == 2
+
+
+def test_resolve_niah_layout_dimensions_clamps_width_and_height() -> None:
+    layout_state = build_niah_layout_state(left_panel_width=900, result_summary_height=999)
+
+    dimensions = resolve_niah_layout_dimensions(
+        layout_state,
+        container_width=1100,
+        top_panel_height=430,
+    )
+
+    assert dimensions.left_panel_width == 714
+    assert dimensions.right_panel_width == 360
+    assert dimensions.result_summary_height == 160
+    assert dimensions.heatmap_height == 180
 
 
 def test_build_niah_parameter_specs_exposes_help_text() -> None:
