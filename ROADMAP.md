@@ -4,16 +4,6 @@
 
 ## 开发中 (In Progress)
 
-- [ ] **为测试项目设计策略模式接口 (核心解耦)**
-    - [ ] 定义 `BaseEvalStrategy` 接口类
-        - 规范输入参数 (Model config, Test parameters)
-        - 规范生命周期方法 (`prepare()`, `execute()`, `get_results()`, `cancel()`)
-    - [ ] 实现任务调度器 (`TaskRunner`)
-        - 利用 `threading` 实现后台队列执行
-        - 实现任务状态回调机制 (通知 UI 更新进度)
-    - [ ] 实现评估结果标准数据模型
-        - 统一各类测试输出的数据结构，方便 UI 进行表格或图表渲染
-
 - [ ] **实现捞针测试 (Needle-In-A-Haystack, NIAH)**
     - [ ] 编写 EvalScope 捞针任务适配器 (`NIAHStrategy`)
         - 继承 `BaseEvalStrategy` 接口
@@ -57,3 +47,13 @@
     - [x] 模型 API 配置面板
         - 支持添加、编辑、删除不同模型的 API 凭证 (Base URL, API Key, Model Name)
         - 确保证书在本地的安全存取机制
+
+- [x] **为测试项目设计策略模式接口 (核心解耦)**
+    - [x] 定义 `BaseEvalStrategy` 接口类
+        - 规范输入参数 (Model config, Test parameters)
+        - 规范生命周期方法 (`prepare()`, `execute()`, `get_results()`, `cancel()`)
+    - [x] 实现任务调度器 (`TaskRunner`)
+        - 利用 `threading` 实现后台队列执行
+        - 实现任务状态回调机制 (通知 UI 更新进度)
+    - [x] 实现评估结果标准数据模型
+        - 统一各类测试输出的数据结构，方便 UI 进行表格或图表渲染
