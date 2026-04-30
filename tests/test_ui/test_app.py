@@ -51,6 +51,7 @@ def test_build_main_window_state_fills_the_viewport() -> None:
     assert main_window.no_resize is True
     assert main_window.no_collapse is True
     assert main_window.no_close is True
+    assert main_window.no_title_bar is True
 
 
 def test_apply_windows_viewport_title_uses_native_unicode_setter() -> None:
@@ -65,6 +66,22 @@ def test_apply_windows_viewport_title_uses_native_unicode_setter() -> None:
 
     assert updated is True
     assert calls == [(1234, "LLM API 评测工具")]
+
+
+def test_apply_windows_viewport_title_falls_back_to_window_lookup() -> None:
+    calls: list[tuple[int, str]] = []
+
+    updated = apply_windows_viewport_title(
+        platform_handle=None,
+        title="LLM API 评测工具",
+        platform_name="nt",
+        set_title_func=lambda handle, value: calls.append((handle, value)),
+        find_window_func=lambda current_title: 5678 if current_title == "ai_test_tool" else None,
+        fallback_window_title="ai_test_tool",
+    )
+
+    assert updated is True
+    assert calls == [(5678, "LLM API 评测工具")]
 
 
 def test_build_navigation_items_covers_primary_sections() -> None:

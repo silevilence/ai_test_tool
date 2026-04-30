@@ -52,18 +52,28 @@ def get_shared_sink() -> InMemoryLogSink:
     return _SHARED_SINK
 
 
-def get_logger(name: str, sink: InMemoryLogSink | None = None) -> logging.Logger:
-    active_sink = sink or _SHARED_SINK
-    logger = logging.getLogger(f"ai_test_tool.{name}")
-
+def _attach_sink_handler(logger: logging.Logger, sink: InMemoryLogSink) -> logging.Logger:
     with _CONFIG_LOCK:
         logger.setLevel(logging.INFO)
         logger.propagate = False
 
         if not any(
-            isinstance(handler, _InMemoryLogHandler) and handler.sink is active_sink
+            isinstance(handler, _InMemoryLogHandler) and handler.sink is sink
             for handler in logger.handlers
         ):
-            logger.addHandler(_InMemoryLogHandler(active_sink))
+            logger.addHandler(_InMemoryLogHandler(sink))
 
     return logger
+
+
+def get_logger(name: str, sink: InMemoryLogSink | None = None) -> logging.Logger:
+    active_sink = sink or _SHARED_SINK
+    logger = logging.getLogger(f"ai_test_tool.{name}")
+
+    return _attach_sink_handler(logger, active_sink)
+
+
+def attach_external_logger(name: str, sink: InMemoryLogSink | None = None) -> logging.Logger:
+    active_sink = sink or _SHARED_SINK
+    logger = logging.getLogger(name)
+    return _attach_sink_handler(logger, active_sink)

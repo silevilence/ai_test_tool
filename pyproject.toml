@@ -9,7 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "dearpygui>=2.3",
-    "evalscope>=1.6.1",
+    "evalscope[all]>=1.6.1",
 ]
 
 [project.scripts]

@@ -2,13 +2,22 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
+from queue import Empty, SimpleQueue
+import time
+import webbrowser
+from uuid import uuid4
 
 from core.config import ModelConfig
 from core.config import ModelConfigStore
+from core.logger import attach_external_logger
 from core.logger import get_logger
 from core.logger import get_shared_sink
+from core.runner import TaskRunner
+from core.runner import TaskSnapshot
+from tests.niah_test import NeedleInHaystackStrategy
 from ui.components import (
     NavigationItem,
     add_log_output,
@@ -20,6 +29,9 @@ from ui.components import (
     build_model_config_form_state,
     build_model_config_list_items,
     build_model_config_usage_notes,
+    build_niah_heatmap_state,
+    build_niah_parameter_specs,
+    build_niah_panel_state,
     build_progress_state,
     build_status_state,
     format_log_entries,
@@ -44,6 +56,37 @@ if os.name == "nt":
 
 
 _CONTENT_BOTTOM_PADDING = 12
+_TASK_STATUS_PROGRESS = {
+    "queued": (0.05, "已排队"),
+    "preparing": (0.2, "准备中"),
+    "running": (0.65, "运行中"),
+    "completed": (1.0, "已完成"),
+    "failed": (1.0, "失败"),
+    "cancelled": (0.0, "已取消"),
+}
+_NIAH_TOP_PANEL_HEIGHT_EXPANDED = 430
+_NIAH_TOP_PANEL_HEIGHT_COLLAPSED = 660
+_NIAH_SUMMARY_HEIGHT_EXPANDED = 120
+_NIAH_SUMMARY_HEIGHT_COLLAPSED = 140
+_NIAH_HEATMAP_HEIGHT_EXPANDED = 230
+_NIAH_HEATMAP_HEIGHT_COLLAPSED = 430
+_PROGRESS_POLL_INTERVAL_SECONDS = 0.5
+_NIAH_EDITABLE_TAGS = (
+    "niah_model_config_list",
+    "niah_judge_model_config_list",
+    "niah_retrieval_question",
+    "niah_needles_text",
+    "niah_tokenizer_path",
+    "niah_context_lengths_min",
+    "niah_context_lengths_max",
+    "niah_context_lengths_num_intervals",
+    "niah_document_depth_percent_min",
+    "niah_document_depth_percent_max",
+    "niah_document_depth_percent_intervals",
+    "niah_subset_english",
+    "niah_subset_chinese",
+    "niah_show_score",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +112,19 @@ class MainWindowState:
     no_resize: bool
     no_collapse: bool
     no_close: bool
+    no_title_bar: bool
+
+
+@dataclass(slots=True)
+class AppRuntimeState:
+    store: ModelConfigStore
+    task_runner: TaskRunner
+    update_queue: SimpleQueue[TaskSnapshot]
+    active_task_id: str | None = None
+    active_strategy: NeedleInHaystackStrategy | None = None
+    active_task_status: str | None = None
+    active_task_started_at: float | None = None
+    last_progress_poll_at: float = 0.0
 
 
 def build_app_shell() -> AppShell:
@@ -95,6 +151,7 @@ def build_main_window_state(shell: AppShell) -> MainWindowState:
         no_resize=True,
         no_collapse=True,
         no_close=True,
+        no_title_bar=True,
     )
 
 
@@ -136,18 +193,36 @@ def _set_native_windows_title(platform_handle: int, title: str) -> None:
     ctypes.windll.user32.SetWindowTextW(int(platform_handle), title)
 
 
+def _find_native_window_by_title(window_title: str) -> int | None:
+    if os.name != "nt" or not window_title:
+        return None
+
+    handle = ctypes.windll.user32.FindWindowW(None, window_title)
+    return int(handle) if handle else None
+
+
 def apply_windows_viewport_title(
     platform_handle: int | None,
     title: str,
     platform_name: str | None = None,
     set_title_func: Callable[[int, str], None] | None = None,
+    find_window_func: Callable[[str], int | None] | None = None,
+    fallback_window_title: str | None = None,
 ) -> bool:
     active_platform_name = platform_name or os.name
-    if active_platform_name != "nt" or not platform_handle:
+    if active_platform_name != "nt":
+        return False
+
+    resolved_handle = platform_handle
+    if not resolved_handle:
+        title_finder = find_window_func or _find_native_window_by_title
+        resolved_handle = title_finder(fallback_window_title or "")
+
+    if not resolved_handle:
         return False
 
     title_setter = set_title_func or _set_native_windows_title
-    title_setter(int(platform_handle), title)
+    title_setter(int(resolved_handle), title)
     return True
 
 
@@ -198,8 +273,18 @@ def _refresh_model_config_list(
     dpg.configure_item("config_list", items=items)
     dpg.configure_item("config_list_hint", show=not items)
 
+    if dpg.does_item_exist("niah_model_config_list"):
+        dpg.configure_item("niah_model_config_list", items=items)
+    if dpg.does_item_exist("niah_judge_model_config_list"):
+        dpg.configure_item("niah_judge_model_config_list", items=items)
+
     if items and selected_display_name in items:
         dpg.set_value("config_list", selected_display_name)
+
+        if dpg.does_item_exist("niah_model_config_list") and not dpg.get_value("niah_model_config_list"):
+            dpg.set_value("niah_model_config_list", selected_display_name)
+        if dpg.does_item_exist("niah_judge_model_config_list") and not dpg.get_value("niah_judge_model_config_list"):
+            dpg.set_value("niah_judge_model_config_list", selected_display_name)
 
 
 def _show_section(dpg: object, section_tag: str) -> None:
@@ -329,6 +414,642 @@ def _build_model_config_panel(dpg: object, store: ModelConfigStore) -> None:
         _set_model_config_form_values(dpg)
 
 
+def _set_task_progress(dpg: object, status: str) -> None:
+    progress_value, overlay = _TASK_STATUS_PROGRESS.get(status, (0.0, status))
+    if dpg.does_item_exist("task_progress"):
+        dpg.set_value("task_progress", progress_value)
+        dpg.configure_item("task_progress", overlay=overlay)
+
+
+def _set_niah_panel_status(dpg: object, message: str) -> None:
+    if dpg.does_item_exist("niah_panel_status"):
+        dpg.set_value("niah_panel_status", message)
+
+
+def _set_niah_result_summary(dpg: object, message: str) -> None:
+    if dpg.does_item_exist("niah_result_summary"):
+        dpg.set_value("niah_result_summary", message)
+
+
+def _set_niah_report_action(dpg: object, report_html_path: str | None) -> None:
+    if not dpg.does_item_exist("niah_open_report_button"):
+        return
+
+    report_path = Path(report_html_path).resolve() if report_html_path else None
+    is_available = bool(report_path and report_path.exists())
+    dpg.configure_item(
+        "niah_open_report_button",
+        enabled=is_available,
+        user_data=str(report_path) if is_available else None,
+    )
+
+
+def _open_niah_report(_sender: object, _app_data: object, user_data: object) -> None:
+    import dearpygui.dearpygui as dpg
+
+    report_html_path = str(user_data or "").strip()
+    if not report_html_path:
+        _set_status_text(dpg, "当前没有可打开的 HTML 报告")
+        return
+
+    report_path = Path(report_html_path)
+    if not report_path.exists():
+        _set_status_text(dpg, f"HTML 报告不存在: {report_path}")
+        return
+
+    webbrowser.open_new_tab(report_path.resolve().as_uri())
+    _set_status_text(dpg, f"已在浏览器中打开报告: {report_path.name}")
+
+
+def _get_niah_layout_metrics(expanded: bool) -> tuple[int, int, int]:
+    if expanded:
+        return (
+            _NIAH_TOP_PANEL_HEIGHT_EXPANDED,
+            _NIAH_SUMMARY_HEIGHT_EXPANDED,
+            _NIAH_HEATMAP_HEIGHT_EXPANDED,
+        )
+
+    return (
+        _NIAH_TOP_PANEL_HEIGHT_COLLAPSED,
+        _NIAH_SUMMARY_HEIGHT_COLLAPSED,
+        _NIAH_HEATMAP_HEIGHT_COLLAPSED,
+    )
+
+
+def _apply_niah_panel_layout(dpg: object, expanded: bool) -> None:
+    top_panel_height, summary_height, heatmap_height = _get_niah_layout_metrics(expanded)
+
+    for tag in ("niah_left_panel", "niah_right_panel"):
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, height=top_panel_height)
+
+    if dpg.does_item_exist("niah_result_summary"):
+        dpg.configure_item("niah_result_summary", height=summary_height)
+
+    if dpg.does_item_exist("niah_heatmap_plot"):
+        dpg.configure_item("niah_heatmap_plot", height=heatmap_height)
+
+
+def _format_duration(seconds: float | None) -> str:
+    if seconds is None or seconds < 0:
+        return "--:--"
+
+    rounded_seconds = int(round(seconds))
+    hours, remainder = divmod(rounded_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _build_niah_runtime_summary(
+    status: str,
+    work_dir: str | None,
+    elapsed_seconds: float | None,
+    processed_count: int | None = None,
+    total_count: int | None = None,
+    percent: float | None = None,
+    pipeline: str = "eval",
+) -> str:
+    lines = [
+        f"EvalScope 管线: {pipeline}",
+        f"状态: {status}",
+        f"已用时间: {_format_duration(elapsed_seconds)}",
+    ]
+
+    if processed_count is not None and total_count is not None and percent is not None:
+        lines.append(f"进度: {processed_count} / {total_count} ({percent:.2f}%)")
+        if processed_count > 0 and elapsed_seconds is not None and elapsed_seconds > 0:
+            seconds_per_item = elapsed_seconds / processed_count
+            remaining_count = max(0, total_count - processed_count)
+            lines.append(f"速度: {seconds_per_item:.2f} s/it")
+            lines.append(f"预计剩余: {_format_duration(remaining_count * seconds_per_item)}")
+    else:
+        lines.append("进度: 等待 EvalScope 初始化进度文件...")
+
+    lines.append(f"输出目录: {work_dir or '待创建'}")
+    return "\n".join(lines)
+
+
+def read_evalscope_progress_state(work_dir: str | Path | None) -> dict[str, object] | None:
+    if not work_dir:
+        return None
+
+    progress_path = Path(work_dir) / "progress.json"
+    if not progress_path.exists():
+        return None
+
+    try:
+        payload = json.loads(progress_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+def _set_niah_controls_enabled(dpg: object, enabled: bool) -> None:
+    for tag in _NIAH_EDITABLE_TAGS:
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, enabled=enabled)
+
+
+def _update_niah_pending_status(dpg: object, runtime: AppRuntimeState) -> None:
+    strategy = runtime.active_strategy
+    status = runtime.active_task_status or "queued"
+    work_dir = strategy.task_config.work_dir if strategy and strategy.task_config else None
+    elapsed_seconds = None
+    if runtime.active_task_started_at is not None:
+        elapsed_seconds = max(0.0, time.monotonic() - runtime.active_task_started_at)
+
+    _set_niah_result_summary(
+        dpg,
+        _build_niah_runtime_summary(
+            status=status,
+            work_dir=work_dir,
+            elapsed_seconds=elapsed_seconds,
+        ),
+    )
+
+
+def _set_niah_run_busy(dpg: object, busy: bool) -> None:
+    _set_niah_controls_enabled(dpg, enabled=not busy)
+    if not dpg.does_item_exist("niah_run_button"):
+        return
+
+    dpg.configure_item(
+        "niah_run_button",
+        enabled=not busy,
+        label="运行中..." if busy else "运行捞针测试",
+    )
+
+
+def _set_task_progress_value(dpg: object, value: float, overlay: str) -> None:
+    if dpg.does_item_exist("task_progress"):
+        dpg.set_value("task_progress", value)
+        dpg.configure_item("task_progress", overlay=overlay)
+
+
+def _format_niah_progress_text(progress_state: dict[str, object], work_dir: str | None) -> str:
+    processed_count = progress_state.get("processed_count")
+    total_count = progress_state.get("total_count")
+    percent = progress_state.get("percent")
+    status = progress_state.get("status") or "running"
+    pipeline = progress_state.get("pipeline") or "eval"
+
+    if isinstance(processed_count, int) and isinstance(total_count, int) and isinstance(percent, (int, float)):
+        return (
+            f"EvalScope 管线: {pipeline}\n"
+            f"状态: {status}\n"
+            f"进度: {processed_count} / {total_count} ({float(percent):.2f}%)\n"
+            f"输出目录: {work_dir or '待创建'}"
+        )
+
+    return f"EvalScope 管线: {pipeline}\n状态: {status}\n输出目录: {work_dir or '待创建'}"
+
+
+def _update_niah_progress_from_tracker(dpg: object, runtime: AppRuntimeState) -> None:
+    strategy = runtime.active_strategy
+    if strategy is None or strategy.task_config is None:
+        return
+
+    now = time.monotonic()
+    if (now - runtime.last_progress_poll_at) < _PROGRESS_POLL_INTERVAL_SECONDS:
+        return
+
+    runtime.last_progress_poll_at = now
+
+    progress_state = read_evalscope_progress_state(strategy.task_config.work_dir)
+    if not progress_state:
+        _update_niah_pending_status(dpg, runtime)
+        return
+
+    percent = progress_state.get("percent")
+    processed_count = progress_state.get("processed_count")
+    total_count = progress_state.get("total_count")
+    elapsed_seconds = None
+    if runtime.active_task_started_at is not None:
+        elapsed_seconds = max(0.0, now - runtime.active_task_started_at)
+    if isinstance(percent, (int, float)) and isinstance(processed_count, int) and isinstance(total_count, int):
+        _set_task_progress_value(
+            dpg,
+            max(0.0, min(1.0, float(percent) / 100.0)),
+            f"{processed_count}/{total_count}",
+        )
+        _set_niah_panel_status(
+            dpg,
+            f"任务状态: running | {processed_count}/{total_count} ({float(percent):.2f}%)",
+        )
+
+    _set_niah_result_summary(
+        dpg,
+        _build_niah_runtime_summary(
+            status=str(progress_state.get("status") or runtime.active_task_status or "running"),
+            work_dir=strategy.task_config.work_dir,
+            elapsed_seconds=elapsed_seconds,
+            processed_count=processed_count if isinstance(processed_count, int) else None,
+            total_count=total_count if isinstance(total_count, int) else None,
+            percent=float(percent) if isinstance(percent, (int, float)) else None,
+            pipeline=str(progress_state.get("pipeline") or "eval"),
+        ),
+    )
+
+
+def _update_niah_heatmap(dpg: object, heatmap_artifact: dict[str, object] | None) -> None:
+    context_lengths = []
+    depth_percents = []
+    point_lookup: dict[tuple[int, int], float] = {}
+
+    if isinstance(heatmap_artifact, dict):
+        context_lengths = [
+            value for value in heatmap_artifact.get("context_lengths", []) if isinstance(value, int)
+        ]
+        depth_percents = [
+            value for value in heatmap_artifact.get("depth_percents", []) if isinstance(value, int)
+        ]
+        matrix = heatmap_artifact.get("matrix", [])
+        if isinstance(matrix, list):
+            for row_index, row in enumerate(matrix):
+                if row_index >= len(context_lengths) or not isinstance(row, list):
+                    continue
+                for column_index, value in enumerate(row):
+                    if column_index >= len(depth_percents) or not isinstance(value, (int, float)):
+                        continue
+                    point_lookup[(context_lengths[row_index], depth_percents[column_index])] = float(value)
+
+    heatmap_state = build_niah_heatmap_state(
+        points=[
+            (context_length, depth_percent, value)
+            for (context_length, depth_percent), value in point_lookup.items()
+        ]
+    )
+
+    if dpg.does_item_exist("niah_heatmap_series"):
+        dpg.delete_item("niah_heatmap_series")
+
+    context_ticks = list(heatmap_state.context_lengths)
+    depth_ticks = list(heatmap_state.depth_percents)
+    render_values = [
+        point_lookup.get((context_length, depth_percent), 0.0)
+        for depth_percent in depth_ticks
+        for context_length in context_ticks
+    ]
+    rows = max(1, len(depth_ticks))
+    cols = max(1, len(context_ticks))
+    x_max = max(1, cols - 1)
+    y_max = max(1, rows - 1)
+
+    dpg.add_heat_series(
+        render_values or [0.0],
+        rows,
+        cols,
+        parent="niah_heatmap_y_axis",
+        tag="niah_heatmap_series",
+        bounds_min=(0.0, 0.0),
+        bounds_max=(float(x_max), float(y_max)),
+        scale_min=0.0,
+        scale_max=1.0,
+        format="%0.2f",
+    )
+
+    if hasattr(dpg, "set_axis_ticks"):
+        dpg.set_axis_ticks(
+            "niah_heatmap_x_axis",
+            tuple((str(value), index) for index, value in enumerate(context_ticks)),
+        )
+        dpg.set_axis_ticks(
+            "niah_heatmap_y_axis",
+            tuple((f"{value}%", index) for index, value in enumerate(depth_ticks)),
+        )
+
+
+def _read_niah_parameters(dpg: object, store: ModelConfigStore) -> tuple[ModelConfig, dict[str, object]]:
+    selected_model_name = str(dpg.get_value("niah_model_config_list") or "").strip()
+    selected_judge_name = str(dpg.get_value("niah_judge_model_config_list") or "").strip()
+
+    model_config = store.get(selected_model_name)
+    if model_config is None:
+        raise ValueError("请选择待测模型配置")
+
+    judge_model_config = store.get(selected_judge_name)
+    if judge_model_config is None:
+        raise ValueError("请选择裁判模型配置")
+
+    selected_subsets = []
+    if dpg.get_value("niah_subset_english"):
+        selected_subsets.append("english")
+    if dpg.get_value("niah_subset_chinese"):
+        selected_subsets.append("chinese")
+
+    return model_config, {
+        "retrieval_question": str(dpg.get_value("niah_retrieval_question") or "").strip(),
+        "needles_text": str(dpg.get_value("niah_needles_text") or "").strip(),
+        "context_lengths_min": int(dpg.get_value("niah_context_lengths_min")),
+        "context_lengths_max": int(dpg.get_value("niah_context_lengths_max")),
+        "context_lengths_num_intervals": int(dpg.get_value("niah_context_lengths_num_intervals")),
+        "document_depth_percent_min": int(dpg.get_value("niah_document_depth_percent_min")),
+        "document_depth_percent_max": int(dpg.get_value("niah_document_depth_percent_max")),
+        "document_depth_percent_intervals": int(dpg.get_value("niah_document_depth_percent_intervals")),
+        "tokenizer_path": str(dpg.get_value("niah_tokenizer_path") or "").strip(),
+        "show_score": bool(dpg.get_value("niah_show_score")),
+        "subset_list": selected_subsets,
+        "judge_model": {
+            "api_url": judge_model_config.base_url,
+            "api_key": judge_model_config.api_key,
+            "model_name": judge_model_config.model_name,
+        },
+    }
+
+
+def _handle_run_niah(_sender: object, _app_data: object, user_data: object) -> None:
+    import dearpygui.dearpygui as dpg
+
+    runtime = user_data
+    try:
+        model_config, parameters = _read_niah_parameters(dpg, runtime.store)
+        strategy = NeedleInHaystackStrategy(model_config=model_config, parameters=parameters)
+        strategy.prepare()
+    except ValueError as error:
+        _set_status_text(dpg, str(error))
+        _set_niah_panel_status(dpg, str(error))
+        return
+
+    task_id = f"niah-{uuid4().hex[:8]}"
+    runtime.active_task_id = task_id
+    runtime.active_strategy = strategy
+    runtime.active_task_status = "queued"
+    runtime.active_task_started_at = time.monotonic()
+    runtime.last_progress_poll_at = 0.0
+    runtime.task_runner.submit_strategy(task_id=task_id, strategy=strategy)
+    _set_status_text(dpg, "已提交捞针测试任务")
+    _set_niah_panel_status(dpg, "任务已排队，等待后台执行。")
+    _update_niah_pending_status(dpg, runtime)
+    _set_niah_run_busy(dpg, True)
+    _set_task_progress(dpg, "queued")
+
+
+def _apply_task_snapshot(dpg: object, runtime: AppRuntimeState, snapshot: TaskSnapshot) -> None:
+    if snapshot.task_id != runtime.active_task_id:
+        return
+
+    runtime.active_task_status = snapshot.status
+    _set_task_progress(dpg, snapshot.status)
+    _set_niah_panel_status(dpg, f"任务状态: {snapshot.status}")
+
+    if snapshot.status not in {"completed", "failed", "cancelled"}:
+        _update_niah_pending_status(dpg, runtime)
+        return
+
+    _set_niah_run_busy(dpg, False)
+    active_strategy = runtime.active_strategy
+    runtime.active_strategy = None
+    runtime.active_task_status = None
+    runtime.active_task_started_at = None
+    if snapshot.status == "completed" and snapshot.result is not None:
+        accuracy = snapshot.result.metrics.get("acc", 0.0)
+        sample_count = int(snapshot.result.metrics.get("sample_count", 0.0))
+        outputs_dir = snapshot.result.artifacts.get("outputs_dir") or "未提供输出目录"
+        heatmap_path = snapshot.result.artifacts.get("heatmap_path") or "未提供热力图路径"
+        report_html_path = snapshot.result.artifacts.get("report_html_path") or "未提供 HTML 报告路径"
+        _set_status_text(dpg, "捞针测试已完成")
+        _set_niah_panel_status(dpg, f"任务完成，准确率 {accuracy:.2%}。")
+        _set_niah_result_summary(
+            dpg,
+            f"平均准确率: {accuracy:.2%}\n样本数: {sample_count}\n输出目录: {outputs_dir}\n热力图: {heatmap_path}\nHTML 报告: {report_html_path}",
+        )
+        _set_niah_report_action(
+            dpg,
+            snapshot.result.artifacts.get("report_html_path") if isinstance(snapshot.result.artifacts, dict) else None,
+        )
+        _update_niah_heatmap(dpg, snapshot.result.artifacts.get("heatmap"))
+        return
+
+    if snapshot.status == "failed":
+        _set_status_text(dpg, "捞针测试执行失败")
+        _set_niah_panel_status(dpg, "任务失败，请检查日志输出。")
+        outputs_dir = active_strategy.task_config.work_dir if active_strategy and active_strategy.task_config else "未创建输出目录"
+        _set_niah_result_summary(
+            dpg,
+            f"{snapshot.error_message or '后台任务失败，未返回更多信息。'}\n输出目录: {outputs_dir}",
+        )
+        _set_niah_report_action(dpg, None)
+        return
+
+    _set_status_text(dpg, "捞针测试已取消")
+    _set_niah_panel_status(dpg, "任务已取消。")
+    _set_niah_result_summary(dpg, "任务已取消，未生成结果。")
+    _set_niah_report_action(dpg, None)
+
+
+def _drain_task_updates(dpg: object, runtime: AppRuntimeState) -> None:
+    while True:
+        try:
+            snapshot = runtime.update_queue.get_nowait()
+        except Empty:
+            return
+
+        _apply_task_snapshot(dpg, runtime, snapshot)
+
+
+def _add_niah_help_text(dpg: object, message: str) -> None:
+    dpg.add_text(message, wrap=500)
+
+
+def _build_niah_numeric_group(
+    dpg: object,
+    fields: tuple[tuple[str, str, int, int | None, int | None], ...],
+) -> None:
+    with dpg.table(
+        header_row=False,
+        policy=getattr(dpg, "mvTable_SizingStretchProp", 0),
+        borders_innerV=False,
+        borders_outerV=False,
+        borders_innerH=False,
+        borders_outerH=False,
+        no_host_extendX=True,
+        no_pad_outerX=True,
+    ):
+        for _index in range(len(fields)):
+            dpg.add_table_column(init_width_or_weight=1.0, width_stretch=True)
+
+        with dpg.table_row():
+            for tag, label, default_value, min_value, max_value in fields:
+                with dpg.group():
+                    dpg.add_text(label)
+                    kwargs = {
+                        "tag": tag,
+                        "label": "",
+                        "width": -1,
+                        "default_value": default_value,
+                    }
+                    if min_value is not None:
+                        kwargs["min_value"] = min_value
+                        kwargs["min_clamped"] = True
+                    if max_value is not None:
+                        kwargs["max_value"] = max_value
+                        kwargs["max_clamped"] = True
+                    dpg.add_input_int(**kwargs)
+
+
+def _build_niah_panel(dpg: object, runtime: AppRuntimeState, show: bool) -> None:
+    state = build_niah_panel_state()
+    spec_map = {spec.tag: spec for spec in build_niah_parameter_specs()}
+    with dpg.child_window(tag="section_test_tasks", border=False, autosize_x=True, show=show):
+        dpg.add_text("捞针测试")
+        dpg.add_text("选择待测模型与裁判模型，配置长上下文检索参数后在后台运行 EvalScope。")
+        dpg.add_separator()
+
+        with dpg.table(
+            header_row=False,
+            policy=getattr(dpg, "mvTable_SizingStretchProp", 0),
+            borders_innerV=True,
+            borders_outerV=False,
+            borders_innerH=False,
+            borders_outerH=False,
+            no_host_extendX=True,
+            no_pad_outerX=True,
+            resizable=True,
+        ):
+            dpg.add_table_column(init_width_or_weight=0.42, width_stretch=True)
+            dpg.add_table_column(init_width_or_weight=0.58, width_stretch=True)
+
+            with dpg.table_row():
+                with dpg.child_window(tag="niah_left_panel", border=False, height=_NIAH_TOP_PANEL_HEIGHT_EXPANDED):
+                    dpg.add_text("模型选择")
+                    dpg.add_text(spec_map["niah_model_config_list"].label)
+                    dpg.add_listbox(tag="niah_model_config_list", items=[], width=-1, num_items=5)
+                    _add_niah_help_text(dpg, spec_map["niah_model_config_list"].help_text)
+
+                    dpg.add_text(spec_map["niah_judge_model_config_list"].label)
+                    dpg.add_listbox(tag="niah_judge_model_config_list", items=[], width=-1, num_items=5)
+                    _add_niah_help_text(dpg, spec_map["niah_judge_model_config_list"].help_text)
+                    dpg.add_spacer(height=8)
+
+                    dpg.add_text("基础参数")
+                    dpg.add_text(spec_map["niah_retrieval_question"].label)
+                    dpg.add_input_text(
+                        tag="niah_retrieval_question",
+                        width=-1,
+                        default_value=state.retrieval_question,
+                    )
+                    _add_niah_help_text(dpg, spec_map["niah_retrieval_question"].help_text)
+
+                    dpg.add_text("Needles（每行一个）")
+                    dpg.add_input_text(
+                        tag="niah_needles_text",
+                        width=-1,
+                        height=120,
+                        multiline=True,
+                        no_horizontal_scroll=True,
+                        default_value=state.needles_text,
+                    )
+                    _add_niah_help_text(dpg, spec_map["niah_needles_text"].help_text)
+
+                    dpg.add_text("Tokenizer Path")
+                    dpg.add_input_text(
+                        tag="niah_tokenizer_path",
+                        width=-1,
+                        default_value=state.tokenizer_path,
+                    )
+                    _add_niah_help_text(dpg, spec_map["niah_tokenizer_path"].help_text)
+
+                    dpg.add_spacer(height=8)
+                    dpg.add_text("维度控制")
+                    _add_niah_help_text(dpg, spec_map["niah_context_lengths_num_intervals"].help_text)
+                    _build_niah_numeric_group(
+                        dpg,
+                        fields=(
+                            ("niah_context_lengths_min", "最小 Token 长度", state.context_lengths_min, 1, None),
+                            ("niah_context_lengths_max", "最大 Token 长度", state.context_lengths_max, 1, None),
+                            (
+                                "niah_context_lengths_num_intervals",
+                                "长度区间数",
+                                state.context_lengths_num_intervals,
+                                1,
+                                None,
+                            ),
+                        ),
+                    )
+
+                    _add_niah_help_text(dpg, spec_map["niah_document_depth_percent_intervals"].help_text)
+                    _build_niah_numeric_group(
+                        dpg,
+                        fields=(
+                            (
+                                "niah_document_depth_percent_min",
+                                "最小深度 %",
+                                state.document_depth_percent_min,
+                                0,
+                                100,
+                            ),
+                            (
+                                "niah_document_depth_percent_max",
+                                "最大深度 %",
+                                state.document_depth_percent_max,
+                                0,
+                                100,
+                            ),
+                            (
+                                "niah_document_depth_percent_intervals",
+                                "深度区间数",
+                                state.document_depth_percent_intervals,
+                                1,
+                                None,
+                            ),
+                        ),
+                    )
+
+                    dpg.add_spacer(height=8)
+                    dpg.add_text("语料与显示")
+                    with dpg.group(horizontal=True):
+                        dpg.add_checkbox(label="英文语料", tag="niah_subset_english", default_value=True)
+                        dpg.add_checkbox(label="中文语料", tag="niah_subset_chinese", default_value=True)
+                        dpg.add_checkbox(label="热力图显示数值", tag="niah_show_score", default_value=state.show_score)
+                    _add_niah_help_text(dpg, spec_map["niah_subset_english"].help_text)
+
+                    dpg.add_spacer(height=8)
+                    dpg.add_button(
+                        label=state.run_button_label,
+                        tag="niah_run_button",
+                        callback=_handle_run_niah,
+                        user_data=runtime,
+                    )
+                    dpg.add_text(state.status_text, tag="niah_panel_status", wrap=500)
+
+                with dpg.child_window(tag="niah_right_panel", border=True, height=_NIAH_TOP_PANEL_HEIGHT_EXPANDED):
+                    dpg.add_text("执行与展示")
+                    dpg.add_button(
+                        label="打开 HTML 报告",
+                        tag="niah_open_report_button",
+                        callback=_open_niah_report,
+                        enabled=False,
+                    )
+                    dpg.add_separator()
+                    dpg.add_input_text(
+                        default_value="尚未运行捞针测试。",
+                        tag="niah_result_summary",
+                        multiline=True,
+                        readonly=True,
+                        width=-1,
+                        height=_NIAH_SUMMARY_HEIGHT_EXPANDED,
+                        no_horizontal_scroll=True,
+                    )
+                    with dpg.plot(
+                        label="检索热力图",
+                        tag="niah_heatmap_plot",
+                        height=_NIAH_HEATMAP_HEIGHT_EXPANDED,
+                        width=-1,
+                        no_menus=True,
+                        no_mouse_pos=True,
+                    ):
+                        dpg.add_plot_axis(dpg.mvXAxis, label="上下文长度", tag="niah_heatmap_x_axis")
+                        dpg.add_plot_axis(dpg.mvYAxis, label="文档深度 (%)", tag="niah_heatmap_y_axis")
+
+        _refresh_model_config_list(dpg, runtime.store)
+        _apply_niah_panel_layout(dpg, expanded=True)
+        _set_niah_report_action(dpg, None)
+        _update_niah_heatmap(dpg, None)
+
+
 def _build_placeholder_panel(dpg: object, tag: str, title: str, message: str, show: bool) -> None:
     with dpg.child_window(tag=tag, border=False, autosize_x=True, show=show):
         dpg.add_text(title)
@@ -351,6 +1072,7 @@ def _set_log_panel_expanded(dpg: object, expanded: bool) -> None:
     dpg.configure_item("log_output", show=state.show_log_output, height=state.log_height)
     dpg.configure_item("log_panel_separator", show=state.show_log_output)
     dpg.configure_item("log_panel_toggle_button", label=state.toggle_label)
+    _apply_niah_panel_layout(dpg, expanded=expanded)
 
 
 def _handle_toggle_log_panel(_sender: object, _app_data: object, _user_data: object) -> None:
@@ -409,6 +1131,13 @@ def _build_bottom_panel(dpg: object, shell: AppShell) -> None:
 
 
 def _build_content_panel(dpg: object, shell: AppShell, store: ModelConfigStore) -> None:
+    runtime = AppRuntimeState(
+        store=store,
+        task_runner=TaskRunner(),
+        update_queue=SimpleQueue(),
+    )
+    runtime.task_runner.register_callback(lambda update: runtime.update_queue.put(update))
+
     with dpg.child_window(tag="content_panel", border=False, autosize_x=True):
         with dpg.child_window(
             tag="content_scroll_region",
@@ -419,13 +1148,7 @@ def _build_content_panel(dpg: object, shell: AppShell, store: ModelConfigStore) 
             dpg.add_text(_SECTION_TITLES[shell.default_section_tag], tag="active_section_title")
             dpg.add_separator()
             _build_model_config_panel(dpg, store)
-            _build_placeholder_panel(
-                dpg,
-                tag="section_test_tasks",
-                title="测试任务",
-                message="测试任务视图将在下一阶段接入策略执行与后台调度。",
-                show=False,
-            )
+            _build_niah_panel(dpg, runtime, show=False)
             _build_placeholder_panel(
                 dpg,
                 tag="section_results_overview",
@@ -437,6 +1160,8 @@ def _build_content_panel(dpg: object, shell: AppShell, store: ModelConfigStore) 
             _show_section(dpg, shell.default_section_tag)
 
         _build_bottom_panel(dpg, shell)
+
+    return runtime
 
 
 def refresh_log_output() -> None:
@@ -455,13 +1180,15 @@ def launch_app() -> None:
     main_window = build_main_window_state(shell)
     logger = get_logger("ui")
     store = ModelConfigStore(storage_path=_resolve_model_config_store_path())
+    runtime: AppRuntimeState | None = None
 
     dpg.create_context()
+    attach_external_logger("evalscope")
     _bind_default_font(dpg, "ui")
-    dpg.create_viewport(title=shell.title, width=shell.width, height=shell.height)
+    dpg.create_viewport(title="ai_test_tool", width=shell.width, height=shell.height)
 
     with dpg.window(
-        label=shell.title,
+        label="main_window",
         tag="main_window",
         width=main_window.width,
         height=main_window.height,
@@ -470,10 +1197,11 @@ def launch_app() -> None:
         no_resize=main_window.no_resize,
         no_collapse=main_window.no_collapse,
         no_close=main_window.no_close,
+        no_title_bar=main_window.no_title_bar,
     ):
         with dpg.group(horizontal=True):
             _build_sidebar(dpg, shell)
-            _build_content_panel(dpg, shell, store)
+            runtime = _build_content_panel(dpg, shell, store)
 
     dpg.setup_dearpygui()
     dpg.show_viewport()
@@ -483,14 +1211,27 @@ def launch_app() -> None:
     apply_windows_viewport_title(
         getattr(dpg, "get_viewport_platform_handle", lambda: None)(),
         shell.title,
+        fallback_window_title="ai_test_tool",
     )
     logger.info("UI initialized")
 
     frame_index = 0
-    while dpg.is_dearpygui_running():
-        if frame_index % 15 == 0:
-            refresh_log_output()
-        dpg.render_dearpygui_frame()
-        frame_index += 1
-
-    dpg.destroy_context()
+    try:
+        while dpg.is_dearpygui_running():
+            if runtime is not None:
+                _drain_task_updates(dpg, runtime)
+                _update_niah_progress_from_tracker(dpg, runtime)
+            if frame_index % 15 == 0:
+                refresh_log_output()
+            dpg.render_dearpygui_frame()
+            if frame_index < 3:
+                apply_windows_viewport_title(
+                    getattr(dpg, "get_viewport_platform_handle", lambda: None)(),
+                    shell.title,
+                    fallback_window_title="ai_test_tool",
+                )
+            frame_index += 1
+    finally:
+        if runtime is not None:
+            runtime.task_runner.shutdown()
+        dpg.destroy_context()
